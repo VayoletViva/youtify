@@ -30,6 +30,8 @@ async fn main() -> ExitCode {
             match error {
                 ResolverError::NotFound { .. } => eprintln!("Spotify: no matching public track"),
                 ResolverError::InvalidInput(_) => eprintln!("Spotify: invalid input"),
+                ResolverError::Http { status: 451, .. } =>
+                    eprintln!("Spotify: HTTP/status 451; public content unavailable in this country (no bypass attempted)"),
                 _ => eprintln!("{error}"),
             }
             ExitCode::FAILURE
