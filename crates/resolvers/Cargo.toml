@@ -12,3 +12,7 @@ reqwest.workspace = true
 regex.workspace = true
 url.workspace = true
 rustypipe.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+# RustyPipe's QuickJS dependency has no pregenerated Android bindings.
+rquickjs = { version = "=0.9.0", default-features = false, features = ["bindgen"] }
