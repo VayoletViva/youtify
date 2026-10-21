@@ -49,6 +49,7 @@ jobs:
     env:
       NDK_VERSION: '28.2.13676358'
       BUILD_TOOLS_VERSION: '36.0.0'
+      ANDROID_API_LEVEL: '36'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,11 +88,14 @@ jobs:
           if [ ! -f ../crates/tauri-app/gen/android/gradlew ]; then
             npm run tauri -- android init --ci --skip-targets-install
           fi
-      - name: Install SDK platform required by generated host
+      - name: Pin generated host to available Android SDK
         run: |
-          compile_sdk=$(sed -nE 's/^[[:space:]]*compileSdk = ([0-9]+).*/\1/p' crates/tauri-app/gen/android/app/build.gradle.kts)
-          test -n "$compile_sdk"
-          sdkmanager "platforms;android-$compile_sdk"
+          gradle_file=crates/tauri-app/gen/android/app/build.gradle.kts
+          # The CLI template can reference an SDK not yet published to sdkmanager.
+          sed -i -E "s/^([[:space:]]*)(compileSdk|targetSdk) = [0-9]+/\1\2 = $ANDROID_API_LEVEL/" "$gradle_file"
+          grep -Eq "^[[:space:]]*compileSdk = $ANDROID_API_LEVEL[[:space:]]*$" "$gradle_file"
+          grep -Eq "^[[:space:]]*targetSdk = $ANDROID_API_LEVEL[[:space:]]*$" "$gradle_file"
+          sdkmanager "platforms;android-$ANDROID_API_LEVEL"
       - name: Build installable debug APK (includes UI build)
         working-directory: ui
         run: npm run tauri -- android build --ci --debug --apk --target aarch64 -- --locked

@@ -57,9 +57,10 @@ the NDK also supplies the C toolchain for bundled SQLite and native dependencies
 At inspection, `gen` contained schemas only, not an Android Gradle host. The
 crate already exposes `tauri::mobile_entry_point` and the required library crate
 types. CI runs `tauri android init --ci --skip-targets-install` if `gradlew` is
-absent, then installs the numeric `compileSdk` platform from the generated app
-Gradle file. The locked CLI 2.12.3 upstream template currently specifies API 37;
-the generated template, not an assumed API 34/35, determines this requirement.
+absent, then pins both `compileSdk` and `targetSdk` in the generated app Gradle
+file to API 36 and installs that platform. `ANDROID_API_LEVEL` in the workflow
+controls this pin. The CLI template can specify API 37 before that package is
+available from sdkmanager; using the template value directly breaks CI.
 Gradle may fetch additional SDK/build dependencies. SDK licenses are accepted by
 setup-android. Network access to npm, crates.io, Codeberg (the pinned rustypipe
 Git dependency), Google Maven/SDK, and Gradle distribution servers is required.
