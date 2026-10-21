@@ -80,7 +80,11 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
           # Bindgen must parse Android headers, not the runner's Linux headers.
-          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/sysroot --target=aarch64-linux-android24" >> "$GITHUB_ENV"
+          min_sdk=$(node -p "require('./crates/tauri-app/tauri.conf.json').bundle.android.minSdkVersion")
+          # CPAL uses AAudio, which is available starting at API 26.
+          test "$min_sdk" -ge 26
+          test -f "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/$min_sdk/libaaudio.so"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/sysroot --target=aarch64-linux-android$min_sdk" >> "$GITHUB_ENV"
       - name: Install UI dependencies and locked Tauri CLI
         working-directory: ui
         run: npm ci

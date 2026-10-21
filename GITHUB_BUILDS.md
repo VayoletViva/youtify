@@ -22,7 +22,7 @@ GitHub Release, publish to a store, commit files, or require signing secrets.
 | Artifact | Contents | Intended use |
 | --- | --- | --- |
 | `windows-x64-nsis-unsigned` | NSIS `.exe` installer, release profile, Windows x64 | Desktop testing; no Authenticode signature |
-| `android-arm64-apk-debug-signed` | Debug `.apk`, arm64-v8a only | Sideload testing on compatible Android API 24+ devices |
+| `android-arm64-apk-debug-signed` | Debug `.apk`, arm64-v8a only | Sideload testing on compatible Android 8.0 / API 26+ devices |
 
 Missing installers fail the upload step rather than silently succeeding. Android
 also runs `apksigner verify` before uploading. Successful packaging/signature
@@ -53,6 +53,10 @@ installed NDK. Rust target `aarch64-linux-android` corresponds to Tauri's
 `--target aarch64` and Android ABI `arm64-v8a`. This is not an x86 emulator APK
 or a universal APK. Tauri configures the Android compiler/linker environment;
 the NDK also supplies the C toolchain for bundled SQLite and native dependencies.
+
+The minimum Android version is API 26 because CPAL links against AAudio.
+`bundle.android.minSdkVersion` controls the Tauri linker API and CI's bindgen
+target; CI also verifies that the NDK supplies `libaaudio.so` for this API.
 
 At inspection, `gen` contained schemas only, not an Android Gradle host. The
 crate already exposes `tauri::mobile_entry_point` and the required library crate

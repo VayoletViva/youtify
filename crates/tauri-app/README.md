@@ -40,7 +40,7 @@ release build, enable that feature explicitly and build the frontend first.
 ## Android
 
 The library exposes `tauri::mobile_entry_point`, produces `staticlib`, `cdylib`
-and `rlib`, and configures Android API 24+. Install Android Studio, SDK/NDK,
+and `rlib`, and configures Android API 26+ (AAudio). Install Android Studio, SDK/NDK,
 JDK and Rust Android targets following Tauri v2 prerequisites. From the frontend:
 
 ```text

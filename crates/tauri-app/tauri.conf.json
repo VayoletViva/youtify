@@ -16,5 +16,5 @@
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' ipc: http://ipc.localhost http: ws:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"], "android": { "minSdkVersion": 24 } }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"], "android": { "minSdkVersion": 26 } }
 }
