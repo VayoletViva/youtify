@@ -58,6 +58,12 @@ The minimum Android version is API 26 because CPAL links against AAudio.
 `bundle.android.minSdkVersion` controls the Tauri linker API and CI's bindgen
 target; CI also verifies that the NDK supplies `libaaudio.so` for this API.
 
+Android Gradle invokes `npm run tauri` from `crates/tauri-app`, not `ui`.
+The private `crates/tauri-app/package.json` forwards that callback to the CLI
+installed in `ui/node_modules`. Keep this manifest in Git; it requires no
+separate `npm install` or lockfile. UI dependencies remain locked in
+`ui/package-lock.json`.
+
 At inspection, `gen` contained schemas only, not an Android Gradle host. The
 crate already exposes `tauri::mobile_entry_point` and the required library crate
 types. CI runs `tauri android init --ci --skip-targets-install` if `gradlew` is
