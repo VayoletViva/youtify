@@ -1,0 +1,8 @@
+/gen/android/.gradle/
+/gen/android/app/build/
+/gen/android/build/
+/gen/android/local.properties
+/gen/schemas/
+/icons/icon.png
+/icons/icon.ico
+/icons/icon.icns

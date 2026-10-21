@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "outDir": ".test", "rootDir": "src" },
+  "include": ["src/theme.ts", "src/theme.test.ts"]
+}

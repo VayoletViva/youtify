@@ -1,0 +1,13 @@
+[package]
+name = "audio-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-types.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+rodio = { version = "0.21.1", default-features = false, features = ["playback", "symphonia-all"] }
+crossbeam-channel = "0.5"

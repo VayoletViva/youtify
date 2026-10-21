@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#121610" />
+    <title>Youtify — твой ритм</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">К содержимому</a>
+    <nav class="navigation" aria-label="Основная навигация">
+      <span class="brand" aria-label="Youtify"><svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true"><path d="M7 8h9l6 12 6-12h9L20 34H10l7-11Z" fill="currentColor"/><path d="m17 9 11 7-11 7Z" fill="var(--md-sys-color-surface)"/></svg></span>
+      <button class="nav-item active" data-view="home" aria-current="page"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10H7V10m3 10v-7h4v7"/></svg></span>Главная</button>
+      <button class="nav-item" data-view="search"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></span>Поиск</button>
+      <button class="nav-item" data-view="queue"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 11h16M4 17h8m5-2 4 3-4 3Z"/></svg></span>Очередь</button>
+      <span class="rail-caption">ТВОЙ<br />РИТМ</span>
+    </nav>
+
+    <main id="content" tabindex="-1">
+      <header class="page-header"><div><p class="eyebrow wordmark"><svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true"><path d="M7 8h9l6 12 6-12h9L20 34H10l7-11Z" fill="currentColor"/><path d="m17 9 11 7-11 7Z" fill="var(--md-sys-color-surface)"/></svg>Youtify<span>МУЗЫКА В ТВОЁМ ТЕМПЕ</span></p><h1 id="page-title">Твой ритм. Твоя волна.</h1></div><span class="local-badge">Профиль вкуса · локально</span></header>
+      <section id="home-view" aria-label="Моя Волна">
+        <div class="wave-card">
+          <div class="wave-art" aria-hidden="true"><div class="record-flower"><i></i><i></i><i></i><i></i><i></i><i></i><span class="record-label"><svg viewBox="0 0 40 40"><path d="M7 8h9l6 12 6-12h9L20 34H10l7-11Z" fill="currentColor"/></svg></span></div></div>
+          <div class="wave-copy"><p class="eyebrow">НАСТРОЙСЯ НА СЕБЯ</p><h2>Моя<br />Волна<span aria-hidden="true">.</span></h2><p>Музыка, которая узнаёт тебя.<br />Твой вкус остаётся только у тебя.</p><button class="primary wave-start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 11 7-11 7Z" fill="currentColor" stroke="none"/></svg>Поймать волну</button></div>
+          <span class="wave-note">Твой вкус. Новые открытия. Без пауз.</span>
+        </div>
+        <div class="section-heading"><h2>С чего начнём?</h2><span>Сначала найди музыку или добавь плейлист</span></div>
+      </section>
+
+      <section id="search-view" aria-label="Поиск музыки">
+        <form id="search-form" role="search">
+          <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">Название, исполнитель или ссылка</span><input id="query" type="search" required maxlength="2048" placeholder="Трек, исполнитель или ссылка" autocomplete="off" /></label>
+          <label class="source-field"><span class="sr-only">Источник метаданных</span><select id="source"><option value="spotify">Spotify</option><option value="soundcloud">SoundCloud</option><option value="spotify-playlist">Spotify · плейлист</option><option value="soundcloud-playlist">SoundCloud · плейлист</option></select></label>
+          <button id="search-submit" class="tonal" type="submit">Найти</button>
+        </form>
+        <p class="search-hint">Ищи в Spotify или SoundCloud, слушай из YouTube или SoundCloud. По названию найдём лучшее совпадение, по ссылке на плейлист — список треков.</p>
+        <p id="search-status" role="status">Твоя музыкальная коллекция начинается с одного трека.</p>
+        <div id="results" class="track-list" aria-label="Результаты поиска"></div>
+        <button id="more-results" class="tonal" hidden>Показать ещё</button>
+      </section>
+
+      <section id="queue-view" aria-label="Очередь воспроизведения" hidden>
+        <div class="section-heading"><h2>Дальше в эфире</h2><span id="queue-mode">Обычная очередь</span></div>
+        <p id="queue-empty">Пока пусто. Включи Волну или выбери трек из плейлиста.</p>
+        <div id="queue-list" class="track-list"></div>
+      </section>
+      <p id="app-status" class="app-status" role="status">Подключение к плееру…</p>
+    </main>
+
+    <section id="player" class="floating-player" aria-label="Плеер">
+      <button id="open-player" class="now-playing" aria-label="Открыть плеер" aria-haspopup="dialog"><span class="cover-frame small"><img id="bar-cover" alt="" hidden /><span class="cover-fallback" aria-hidden="true">♪</span></span><span class="track-copy"><strong id="bar-title">Музыка ждёт</strong><span id="bar-artist">Выбери свой первый трек</span></span></button>
+      <div class="transport"><div class="transport-buttons"><button class="wave-toggle icon-button" aria-label="Включить Мою Волну" title="Моя Волна"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8c3-6 6 6 9 0s6 6 9 0M3 16c3-6 6 6 9 0s6 6 9 0"/></svg></button><button class="play-toggle play-button" aria-label="Продолжить" disabled>▶</button><button class="skip-track icon-button" aria-label="Следующий трек" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 10 7-10 7ZM19 5v14"/></svg></button></div><div class="timeline"><span class="position">0:00</span><input class="seek" aria-label="Позиция воспроизведения" type="range" min="0" max="1" value="0" step="250" disabled /><span class="duration">0:00</span></div></div>
+      <div class="player-options"><span class="gapless-status" aria-live="polite">Очередь пуста</span><label class="volume-control"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4Zm13-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg><span class="sr-only">Громкость</span><input class="volume" type="range" min="0" max="1" step="0.01" value="1" /></label></div>
+    </section>
+
+    <dialog id="player-sheet" aria-labelledby="sheet-title">
+      <header class="sheet-header"><button id="close-player" class="icon-button" aria-label="Свернуть плеер"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><span class="eyebrow">ТВОЁ ЗВУЧАНИЕ</span><span class="sheet-mark">Youtify</span></header>
+      <div class="sheet-content"><div class="cover-frame hero-cover"><img id="sheet-cover" alt="Обложка текущего трека" hidden /><span class="cover-fallback" aria-hidden="true">♪</span></div>
+        <div class="sheet-track"><h2 id="sheet-title">Музыка ждёт</h2><p id="sheet-artist">Выбери свой первый трек</p></div>
+        <div class="timeline"><span class="position">0:00</span><input class="seek" aria-label="Позиция воспроизведения" type="range" min="0" max="1" value="0" step="250" disabled /><span class="duration">0:00</span></div>
+        <div class="sheet-controls"><button class="wave-toggle icon-button" aria-label="Включить Мою Волну"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8c3-6 6 6 9 0s6 6 9 0M3 16c3-6 6 6 9 0s6 6 9 0"/></svg></button><button class="play-toggle play-button" aria-label="Продолжить" disabled>▶</button><button class="skip-track icon-button" aria-label="Следующий трек" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 10 7-10 7ZM19 5v14"/></svg></button></div>
+        <label class="volume-control"><span>Громкость</span><input class="volume" aria-label="Громкость" type="range" min="0" max="1" step="0.01" value="1" /></label>
+        <div class="sheet-next"><span class="gapless-status">Очередь пуста</span><p id="next-title">Следующий трек ещё не выбран</p></div>
+      </div>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

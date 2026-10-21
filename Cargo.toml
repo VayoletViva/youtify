@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core-types", "crates/resolvers", "crates/cli-test", "crates/audio-engine", "crates/wave-engine", "crates/tauri-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+core-types = { path = "crates/core-types" }
+audio-engine = { path = "crates/audio-engine" }
+wave-engine = { path = "crates/wave-engine" }
+resolvers = { path = "crates/resolvers" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli"] }
+regex = "1"
+url = "2"
+# Upstream #60 propagates visitor-data fetch errors instead of panicking in 0.11.4.
+rustypipe = { git = "https://codeberg.org/ThetaDev/rustypipe.git", rev = "71712e4eda5d78516fa9a5a7c3ab85daf1dc0bbc", default-features = false, features = ["rustls-tls-webpki-roots"] }
