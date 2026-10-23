@@ -1,4 +1,5 @@
 //! Public Spotify embeds, with anonymous Web API search/fallback.
+//! Anonymous sessions are not official OAuth or Client Credentials authorization.
 use core_types::{MetadataProvider, ResolverError, TrackMetadata};
 use regex::Regex;
 use reqwest::Client;
@@ -14,13 +15,14 @@ const BOOTSTRAP_TRACK: &str = "4cOdK2wGLETKBW3PvgPWqT";
 pub struct Spotify {
     client: Client,
     session: Mutex<Option<(String, u64)>>,
+    session_refresh: Mutex<()>,
     api_retry_at: Mutex<Option<Instant>>,
     embed_retry_at: Mutex<Option<Instant>>,
 }
 
 impl Spotify {
     pub fn new() -> Result<Self, ResolverError> {
-        Ok(Self { client: http::client()?, session: Mutex::new(None),
+        Ok(Self { client: http::client()?, session: Mutex::new(None), session_refresh: Mutex::new(()),
             api_retry_at: Mutex::new(None), embed_retry_at: Mutex::new(None) })
     }
 
@@ -50,7 +52,7 @@ impl Spotify {
     }
 
     async fn parse_embed(&self, html: &str) -> Result<Value, ResolverError> {
-        let re = Regex::new(r#"(?s)<script\b[^>]*\bid=["']__NEXT_DATA__["'][^>]*>(.*?)</script>"#)
+        let re = Regex::new(r#"(?s)<script[^>]*id=["']?__NEXT_DATA__["']?[^>]*>(.*?)</script>"#)
             .map_err(|e| parse_error(SERVICE, e.to_string()))?;
         let json = re.captures(&html).and_then(|c| c.get(1))
             .ok_or_else(|| parse_error(SERVICE, "embed has no __NEXT_DATA__"))?;
@@ -67,24 +69,39 @@ impl Spotify {
         if let Some(token) = string(&data, "/props/pageProps/state/settings/session/accessToken") {
             let expires = data.pointer("/props/pageProps/state/settings/session/accessTokenExpirationTimestampMs")
                 .and_then(Value::as_u64).unwrap_or(0) / 1000;
-            *self.session.lock().await = Some((token, expires));
+            let candidate = Some((token, expires));
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let mut session = self.session.lock().await;
+            if session_token(&candidate, now).is_some()
+                && session.as_ref().map_or(true, |current| expires > current.1) {
+                *session = candidate;
+            }
         }
         Ok(data)
     }
 
     async fn token(&self) -> Result<String, ResolverError> {
+        // Recheck the cache after acquiring the lock so concurrent misses share a bootstrap.
+        let _refresh = self.session_refresh.lock().await;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         {
             let session = self.session.lock().await;
-            if let Some((token, expires)) = session.as_ref() {
-                if *expires > now + 30 { return Ok(token.clone()); }
-            }
+            if let Some(token) = session_token(&session, now) { return Ok(token); }
         }
         // A session bootstrap needs no metadata entity.
         self.embed_data("track", BOOTSTRAP_TRACK).await?;
-        self.session.lock().await.as_ref().map(|s| s.0.clone()).ok_or_else(|| ResolverError::Unavailable {
-            service: SERVICE, message: "Spotify did not issue an anonymous token".into(),
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        session_token(&*self.session.lock().await, now).ok_or_else(|| ResolverError::Unavailable {
+            service: SERVICE, message: "Spotify did not issue a usable anonymous token".into(),
         })
+    }
+
+    async fn invalidate_token(&self, rejected: &str) {
+        let mut session = self.session.lock().await;
+        // A late 401 for an older request must not discard a refreshed session.
+        if session.as_ref().is_some_and(|(token, _)| token == rejected) {
+            *session = None;
+        }
     }
 
     async fn api(&self, url: &str, query: &[(&str, &str)]) -> Result<Value, ResolverError> {
@@ -98,11 +115,11 @@ impl Spotify {
         }
         for attempt in 0..2 {
             let token = self.token().await?;
-            let result = self.text(self.client.get(url.clone()).bearer_auth(token).query(query), true).await
+            let result = self.text(self.client.get(url.clone()).bearer_auth(&token).query(query), true).await
                 .and_then(|body| serde_json::from_str::<Value>(&body).map_err(|e| parse_error(SERVICE, e.to_string())));
-            if attempt == 0 && matches!(result, Err(ResolverError::Http { status: 401, .. })) {
-                *self.session.lock().await = None;
-                continue;
+            if matches!(result, Err(ResolverError::Http { status: 401, .. })) {
+                self.invalidate_token(&token).await;
+                if attempt == 0 { continue; }
             }
             return result;
         }
@@ -115,10 +132,12 @@ impl Spotify {
             // Missing ISRC/album remain None rather than being inferred.
             Ok(track) => Ok(track),
             Err(error @ ResolverError::RateLimited { .. }) => Err(error),
+            Err(error @ ResolverError::Http { status: 451, .. }) => Err(error),
             Err(embed_error) => {
                 match self.api(&format!("https://api.spotify.com/v1/tracks/{id}"), &[]).await {
                     Ok(full) => parse_track(&full),
                     Err(error @ ResolverError::RateLimited { .. }) => Err(error),
+                    Err(error @ ResolverError::Http { status: 451, .. }) => Err(error),
                     Err(_) => Err(embed_error),
                 }
             }
@@ -152,6 +171,7 @@ impl MetadataProvider for Spotify {
             let page = match self.api(&url, &[]).await {
                 Ok(page) => page,
                 Err(error @ ResolverError::RateLimited { .. }) => return Err(error),
+                Err(error @ ResolverError::Http { status: 451, .. }) => return Err(error),
                 Err(_) if tracks.is_empty() => { api_failed = true; break; }
                 Err(error) => return Err(error),
             };
@@ -176,6 +196,11 @@ impl MetadataProvider for Spotify {
         }
         Ok(tracks)
     }
+}
+
+fn session_token(session: &Option<(String, u64)>, now: u64) -> Option<String> {
+    session.as_ref().filter(|(token, expires)| !token.trim().is_empty() && *expires > now.saturating_add(30))
+        .map(|(token, _)| token.clone())
 }
 
 fn cooldown_seconds(retry_at: Option<Instant>, now: Instant) -> Option<u64> {
@@ -221,6 +246,82 @@ mod embed_tests {
 
     fn html(data: Value) -> String {
         format!("<html><script type='application/json' id='__NEXT_DATA__'>{data}</script></html>")
+    }
+
+    #[test]
+    fn cached_token_requires_nonempty_value_and_expiry_margin() {
+        assert_eq!(session_token(&None, 100), None);
+        for (token, expires) in [("token", 0), ("token", 99), ("token", 130), ("", 200), ("  ", 200)] {
+            assert_eq!(session_token(&Some((token.into(), expires)), 100), None);
+        }
+        assert_eq!(session_token(&Some(("token".into(), 131)), 100).as_deref(), Some("token"));
+        assert_eq!(session_token(&Some(("token".into(), u64::MAX)), u64::MAX), None);
+    }
+
+    #[tokio::test]
+    async fn invalid_or_older_embed_sessions_do_not_replace_valid_cache() {
+        let spotify = Spotify::new().unwrap();
+        for initial in [None, Some(("newer".into(), 4102444800))] {
+            *spotify.session.lock().await = initial.clone();
+            for session in [
+                json!({"accessToken": "missing-expiry"}),
+                json!({"accessToken": "expired", "accessTokenExpirationTimestampMs": 1000}),
+                json!({"accessToken": "", "accessTokenExpirationTimestampMs": 4102444800000u64}),
+                json!({"accessToken": "bad-expiry", "accessTokenExpirationTimestampMs": "invalid"}),
+                json!({}),
+            ] {
+                spotify.parse_embed(&html(json!({"props": {"pageProps": {"state": {
+                    "settings": {"session": session}
+                }}}}))).await.unwrap();
+                assert_eq!(*spotify.session.lock().await, initial);
+            }
+        }
+        spotify.parse_embed(&html(json!({"props": {"pageProps": {"state": {
+            "settings": {"session": {
+                "accessToken": "older", "accessTokenExpirationTimestampMs": 4102444700000u64
+            }}
+        }}}}))).await.unwrap();
+        assert_eq!(spotify.token().await.unwrap(), "newer");
+    }
+
+    #[tokio::test]
+    async fn rejected_token_invalidation_preserves_newer_session() {
+        let spotify = Spotify::new().unwrap();
+        *spotify.session.lock().await = Some(("newer".into(), 4102444800));
+        spotify.invalidate_token("older").await;
+        assert_eq!(spotify.token().await.unwrap(), "newer");
+        spotify.invalidate_token("newer").await;
+        assert!(spotify.session.lock().await.is_none());
+        spotify.invalidate_token("newer").await;
+        assert!(spotify.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_cache_cannot_bypass_bootstrap_restrictions() {
+        let spotify = Spotify::new().unwrap();
+        *spotify.session.lock().await = Some(("expired".into(), 1));
+        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(60));
+        assert!(matches!(spotify.token().await, Err(ResolverError::RateLimited { .. })));
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiters_recheck_cache_after_refresh() {
+        let spotify = std::sync::Arc::new(Spotify::new().unwrap());
+        // Make any accidental bootstrap fail locally rather than contacting Spotify.
+        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(60));
+        let refresh = spotify.session_refresh.lock().await;
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let spotify = spotify.clone();
+            waiters.push(tokio::spawn(async move { spotify.token().await }));
+        }
+        tokio::task::yield_now().await;
+        assert!(waiters.iter().all(|waiter| !waiter.is_finished()));
+        *spotify.session.lock().await = Some(("refreshed".into(), 4102444800));
+        drop(refresh);
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap().unwrap(), "refreshed");
+        }
     }
 
     #[tokio::test]

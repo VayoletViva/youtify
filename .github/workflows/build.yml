@@ -32,7 +32,12 @@ jobs:
       - name: Install UI dependencies and locked Tauri CLI
         working-directory: ui
         run: npm ci
-      - name: Build unsigned NSIS installer (includes UI build)
+      - name: Test Material color roles
+        working-directory: ui
+        run: npm test
+      - name: Test resolver regressions
+        run: cargo test -p resolvers --locked
+      - name: Build Windows installer
         working-directory: ui
         run: npm run tauri -- build --ci --no-sign --target x86_64-pc-windows-msvc --bundles nsis -- --locked
       - uses: actions/upload-artifact@v4

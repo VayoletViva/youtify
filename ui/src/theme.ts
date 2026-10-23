@@ -1,47 +1,8 @@
-/** Dependency-free Material You-inspired OKLCH palette, not an HCT approximation. */
+import { argbFromRgb, blueFromArgb, greenFromArgb, Hct, MaterialDynamicColors, redFromArgb, SchemeTonalSpot } from '@material/material-color-utilities';
+
 export type RGB = readonly [number, number, number];
-export type LCH = readonly [number, number, number];
 const FALLBACK: RGB = [190, 222, 146];
 const linear = (v: number): number => (v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-const gamma = (v: number): number => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
-
-export function rgbToOklch(rgb: RGB): LCH {
-  const [r, g, b] = rgb.map(linear);
-  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-  const light = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
-  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
-  const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
-  return [light, Math.hypot(a, bb), (Math.atan2(bb, a) * 180 / Math.PI + 360) % 360];
-}
-
-function toLinear([light, chroma, hue]: LCH): RGB {
-  const a = chroma * Math.cos(hue * Math.PI / 180);
-  const b = chroma * Math.sin(hue * Math.PI / 180);
-  const l = (light + 0.3963377774 * a + 0.2158037573 * b) ** 3;
-  const m = (light - 0.1055613458 * a - 0.0638541728 * b) ** 3;
-  const s = (light - 0.0894841775 * a - 1.291485548 * b) ** 3;
-  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s];
-}
-
-/** Reduce chroma in OKLCH, preserving hue/lightness instead of clipping channels. */
-export function oklchToRgb(lch: LCH): RGB {
-  const [light, chroma, hue] = lch;
-  let lo = 0, hi = chroma;
-  let rgb = toLinear(lch);
-  if (rgb.some(v => v < 0 || v > 1)) {
-    for (let i = 0; i < 18; i++) {
-      const mid = (lo + hi) / 2;
-      if (toLinear([light, mid, hue]).every(v => v >= 0 && v <= 1)) lo = mid;
-      else hi = mid;
-    }
-    rgb = toLinear([light, lo, hue]);
-  }
-  return rgb.map(v => Math.round(Math.max(0, Math.min(255, gamma(v))))) as unknown as RGB;
-}
 
 /** 5-bit/channel quantization, retaining the mean RGB of the largest bin. */
 export function dominantColor(pixels: Uint8ClampedArray): RGB {
@@ -69,27 +30,26 @@ export function contrast(a: RGB, b: RGB): number {
 }
 
 export function palette(seed: RGB): Record<string, string> {
-  const [, c, h] = rgbToOklch(seed);
-  const hue = c < 0.015 ? 130 : h;
-  const primary = oklchToRgb([0.82, Math.min(0.16, Math.max(0.08, c)), hue]);
-  const onPrimary: RGB = contrast(primary, [0, 0, 0]) >= contrast(primary, [255, 255, 255]) ? [0, 0, 0] : [255, 255, 255];
-  const colors: Record<string, RGB> = {
-    primary, 'on-primary': onPrimary,
-    'primary-container': oklchToRgb([0.33, 0.065, hue]),
-    'on-primary-container': oklchToRgb([0.93, 0.065, hue]),
-    tertiary: oklchToRgb([0.82, 0.075, hue + 65]),
-    'on-tertiary': oklchToRgb([0.23, 0.035, hue + 65]),
-    surface: oklchToRgb([0.16, 0.012, hue]),
-    'surface-container-low': oklchToRgb([0.19, 0.018, hue]),
-    'surface-container': oklchToRgb([0.22, 0.022, hue]),
-    'surface-container-high': oklchToRgb([0.28, 0.03, hue]),
-    'secondary-container': oklchToRgb([0.34, 0.06, hue]),
-    'on-secondary-container': oklchToRgb([0.94, 0.025, hue]),
-    'on-surface': oklchToRgb([0.94, 0.01, hue]),
-    'on-surface-variant': oklchToRgb([0.79, 0.025, hue]),
-    'outline-variant': oklchToRgb([0.39, 0.025, hue]),
-  };
-  return Object.fromEntries(Object.entries(colors).map(([key, rgb]) => [`--md-sys-color-${key}`, `rgb(${rgb.join(' ')})`]));
+  const scheme = new SchemeTonalSpot(Hct.fromInt(argbFromRgb(...seed)), true, 0);
+  const colors = new MaterialDynamicColors();
+  const roles = [
+    'background', 'onBackground', 'primary', 'onPrimary', 'primaryContainer', 'onPrimaryContainer',
+    'secondary', 'onSecondary', 'secondaryContainer', 'onSecondaryContainer',
+    'tertiary', 'onTertiary', 'tertiaryContainer', 'onTertiaryContainer',
+    'surface', 'surfaceDim', 'surfaceBright', 'surfaceContainerLowest', 'surfaceContainerLow',
+    'surfaceContainer', 'surfaceContainerHigh', 'surfaceContainerHighest', 'onSurface',
+    'surfaceVariant', 'onSurfaceVariant', 'outline', 'outlineVariant',
+    'inverseSurface', 'inverseOnSurface', 'inversePrimary',
+    'error', 'onError', 'errorContainer', 'onErrorContainer', 'shadow', 'scrim', 'surfaceTint',
+    'primaryFixed', 'primaryFixedDim', 'onPrimaryFixed', 'onPrimaryFixedVariant',
+    'secondaryFixed', 'secondaryFixedDim', 'onSecondaryFixed', 'onSecondaryFixedVariant',
+    'tertiaryFixed', 'tertiaryFixedDim', 'onTertiaryFixed', 'onTertiaryFixedVariant',
+  ] as const;
+  return Object.fromEntries(roles.map(role => {
+    const argb = colors[role]().getArgb(scheme);
+    const name = role.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+    return [`--md-sys-color-${name}`, `rgb(${redFromArgb(argb)} ${greenFromArgb(argb)} ${blueFromArgb(argb)})`];
+  }));
 }
 
 export function safeCoverUrl(raw: string | null): string | null {

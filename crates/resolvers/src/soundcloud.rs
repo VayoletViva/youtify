@@ -36,23 +36,16 @@ impl SoundCloud {
         let mut cached = self.client_id.lock().await;
         if let Some(id) = cached.as_ref() { return Ok(id.clone()); }
         let html = http::text(self.client.get("https://soundcloud.com/"), HOMEPAGE).await?;
-        let scripts = Regex::new(r#"<script\b[^>]*\bsrc=["']([^"']+)["']"#)
-            .map_err(|e| parse_error(SERVICE, e.to_string()))?;
-        let pattern = Regex::new(r#"["']?client_id["']?\s*[:=]\s*["']([A-Za-z0-9]{32})["']"#)
-            .map_err(|e| parse_error(SERVICE, e.to_string()))?;
-        let urls: Vec<_> = scripts.captures_iter(&html).map(|c| c[1].to_owned()).collect();
+        let urls = public_script_urls(&html)?;
         let mut last_error = None;
-        for raw in urls.into_iter().rev() {
-            let raw = if raw.starts_with("//") { format!("https:{raw}") } else { raw };
-            let Ok(url) = http::https_url(&raw, SERVICE) else { continue };
-            if !url.host_str().is_some_and(|h| h.ends_with(".sndcdn.com")) { continue; }
+        for url in urls.into_iter().rev() {
             let script = match http::text(self.client.get(url), SCRIPT).await {
                 Ok(script) => script,
                 Err(error @ ResolverError::RateLimited { .. }) => return Err(error),
                 Err(error) => { last_error = Some(error); continue; }
             };
-            if let Some(found) = pattern.captures(&script) {
-                let id = found[1].to_owned();
+            if let Some(found) = public_client_id(&script)? {
+                let id = found.to_owned();
                 *cached = Some(id.clone());
                 return Ok(id);
             }
@@ -247,6 +240,43 @@ impl StreamResolver for SoundCloud {
     }
 }
 
+fn public_client_id(script: &str) -> Result<Option<&str>, ResolverError> {
+    // Match complete quoted values, not prefixes or mismatched quote pairs.
+    let pattern = Regex::new(
+        r#"(?:^|[^\w$"'\\])(?:client_id|"client_id"|'client_id')\s*[:=]\s*(?:"(?P<double>[A-Za-z0-9]{32})"|'(?P<single>[A-Za-z0-9]{32})')"#,
+    ).map_err(|e| parse_error(SCRIPT, e.to_string()))?;
+    Ok(pattern.captures(script).and_then(|c| c.name("double").or_else(|| c.name("single")))
+        .map(|id| id.as_str()))
+}
+
+fn public_script_urls(html: &str) -> Result<Vec<url::Url>, ResolverError> {
+    // Consume quoted attributes whole so embedded '>' and data-src are not mistaken for src.
+    let tags = Regex::new(r#"(?is)<!--.*?-->|<script(?P<attrs>(?:[\t\n\r\x0c ][^<>"']*|"[^"]*"|'[^']*')*)>"#)
+        .map_err(|e| parse_error(HOMEPAGE, e.to_string()))?;
+    let attributes = Regex::new(r#"[\t\n\r\x0c ]+([^\s=/'"<>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#)
+        .map_err(|e| parse_error(HOMEPAGE, e.to_string()))?;
+    let mut urls = Vec::new();
+    for tag in tags.captures_iter(html) {
+        let Some(attrs) = tag.name("attrs") else { continue };
+        for attr in attributes.captures_iter(attrs.as_str()) {
+            if !attr[1].eq_ignore_ascii_case("src") { continue; }
+            let Some(raw) = attr.get(2).or_else(|| attr.get(3)).or_else(|| attr.get(4)) else { break };
+            let raw = raw.as_str().trim();
+            let raw = if raw.starts_with("//") { format!("https:{raw}") } else { raw.to_owned() };
+            if let Ok(url) = http::https_url(&raw, SCRIPT) {
+                if url.host_str().is_some_and(|h| h.ends_with(".sndcdn.com"))
+                    && url.username().is_empty() && url.password().is_none()
+                    && url.port_or_known_default() == Some(443) {
+                    urls.push(url);
+                }
+            }
+            // HTML uses the first occurrence of a duplicate attribute.
+            break;
+        }
+    }
+    Ok(urls)
+}
+
 fn parse_track(value: &Value) -> Result<TrackMetadata, ResolverError> {
     if value["kind"].as_str() != Some("track") { return Err(parse_error(SERVICE, "not a track")); }
     let id = value["id"].as_u64().ok_or_else(|| parse_error(SERVICE, "track ID missing"))?;
@@ -267,6 +297,81 @@ fn parse_track(value: &Value) -> Result<TrackMetadata, ResolverError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn public_client_id_formats() {
+        let id = "a".repeat(32);
+        for key in ["client_id", "\"client_id\"", "'client_id'"] {
+            for quote in ['\'', '"'] {
+                for separator in [":", " = ", "\n:\t"] {
+                    let script = format!("{{ {key}{separator}{quote}{id}{quote} }}");
+                    assert!(public_client_id(&script).unwrap() == Some(id.as_str()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_client_ids_are_skipped() {
+        let id = "a".repeat(32);
+        for candidate in [
+            format!("client_id:'{id}extra'"),
+            format!("client_id:'{}'", "a".repeat(31)),
+            format!("client_id:'{}!'", "a".repeat(31)),
+            format!("client_id:'{id}\""),
+            format!("client_id:\"{id}'"),
+            format!("client_id:'{id}"),
+            format!("client_id:{id}"),
+            format!("other_client_id:'{id}'"),
+            format!("$client_id:'{id}'"),
+            format!("'other_client_id':'{id}'"),
+            format!("'client_id\":'{id}'"),
+            format!("client_id == '{id}'"),
+        ] {
+            assert!(public_client_id(&candidate).unwrap().is_none());
+            let script = format!("{candidate};\n{{\"client_id\" : \"{id}\"}}");
+            assert!(public_client_id(&script).unwrap() == Some(id.as_str()));
+        }
+    }
+
+    #[test]
+    fn public_script_tag_formats() {
+        let html = r#"
+            <script src="https://a-v2.sndcdn.com/one.js"></script>
+            <SCRIPT defer SRC = '//a-v2.sndcdn.com/two.js'></SCRIPT>
+            <script data-note="a > b src='https://evil.invalid/fake.js'"
+                src = "https://a-v2.sndcdn.com/three.js"></script>
+            <script src=https://a-v2.sndcdn.com/four.js></script>
+        "#;
+        let urls = public_script_urls(html).unwrap();
+        assert_eq!(urls.iter().map(|u| u.path()).collect::<Vec<_>>(),
+            ["/one.js", "/two.js", "/three.js", "/four.js"]);
+        assert!(urls.iter().all(|u| u.scheme() == "https"));
+    }
+
+    #[test]
+    fn unsafe_or_malformed_script_tags_are_skipped() {
+        for html in [
+            r#"<script data-src="https://a.sndcdn.com/no.js">"#,
+            r#"<scripture src="https://a.sndcdn.com/no.js">"#,
+            r#"<!-- <script src="https://a.sndcdn.com/no.js"> -->"#,
+            r#"<script src='https://a.sndcdn.com/no.js">"#,
+            r#"<script src="http://a.sndcdn.com/no.js">"#,
+            r#"<script src="https://sndcdn.com.evil.invalid/no.js">"#,
+            r#"<script src="https://evilsndcdn.com/no.js">"#,
+            r#"<script src="https://evil.invalid/a.sndcdn.com/no.js">"#,
+            r#"<script src="https://user@a.sndcdn.com/no.js">"#,
+            r#"<script src="https://a.sndcdn.com:444/no.js">"#,
+            r#"<script src="/no.js">"#,
+            r#"<script src="https://evil.invalid/no.js" src="https://a.sndcdn.com/no.js">"#,
+        ] {
+            assert!(public_script_urls(html).unwrap().is_empty());
+            let html = format!("{html}\n<script src='https://a.sndcdn.com/ok.js'></script>");
+            let urls = public_script_urls(&html).unwrap();
+            assert_eq!(urls.len(), 1);
+            assert_eq!(urls[0].path(), "/ok.js");
+        }
+    }
 
     #[tokio::test]
     async fn invalid_transcoding_host_does_not_expose_secrets() {
