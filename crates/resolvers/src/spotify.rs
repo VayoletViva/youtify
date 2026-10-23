@@ -11,6 +11,24 @@ use crate::{http, parse_error, required_string, string};
 const SERVICE: &str = "Spotify";
 // A public embed bootstraps a session without user credentials.
 const BOOTSTRAP_TRACK: &str = "4cOdK2wGLETKBW3PvgPWqT";
+const METADATA_TTL: Duration = Duration::from_secs(5 * 60);
+const METADATA_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct MetadataCache(Vec<(String, Instant, TrackMetadata)>);
+
+impl MetadataCache {
+    fn get(&mut self, key: &str, now: Instant) -> Option<TrackMetadata> {
+        self.0.retain(|(_, inserted, _)| now.duration_since(*inserted) < METADATA_TTL);
+        self.0.iter().find(|(cached, _, _)| cached == key).map(|(_, _, track)| track.clone())
+    }
+
+    fn insert(&mut self, key: String, track: TrackMetadata, now: Instant) {
+        self.0.retain(|(cached, inserted, _)| cached != &key && now.duration_since(*inserted) < METADATA_TTL);
+        if self.0.len() == METADATA_CAPACITY { self.0.remove(0); }
+        self.0.push((key, now, track));
+    }
+}
 
 pub struct Spotify {
     client: Client,
@@ -18,12 +36,14 @@ pub struct Spotify {
     session_refresh: Mutex<()>,
     api_retry_at: Mutex<Option<Instant>>,
     embed_retry_at: Mutex<Option<Instant>>,
+    metadata: Mutex<MetadataCache>,
 }
 
 impl Spotify {
     pub fn new() -> Result<Self, ResolverError> {
         Ok(Self { client: http::client()?, session: Mutex::new(None), session_refresh: Mutex::new(()),
-            api_retry_at: Mutex::new(None), embed_retry_at: Mutex::new(None) })
+            api_retry_at: Mutex::new(None), embed_retry_at: Mutex::new(None),
+            metadata: Mutex::new(MetadataCache::default()) })
     }
 
     async fn text(&self, request: reqwest::RequestBuilder, api: bool) -> Result<String, ResolverError> {
@@ -149,13 +169,26 @@ impl Spotify {
 impl MetadataProvider for Spotify {
     async fn track(&self, input: &str) -> Result<TrackMetadata, ResolverError> {
         let input = input.trim();
-        if let Some(id) = spotify_id(input, "track")? { return self.track_id(&id).await; }
+        let id = spotify_id(input, "track")?;
         if input.is_empty() { return Err(ResolverError::InvalidInput("empty search query".into())); }
-        let data = self.api("https://api.spotify.com/v1/search", &[("q", input), ("type", "track"), ("limit", "1")]).await?;
-        let track = data.pointer("/tracks/items/0").ok_or_else(|| ResolverError::NotFound {
-            service: SERVICE, query: input.into(),
-        })?;
-        parse_track(track)
+        let key = match &id {
+            Some(id) => format!("track:{id}"),
+            None => format!("query:{input}"),
+        };
+        // Hold through resolution so waiters recheck successful metadata before any I/O.
+        let mut cache = self.metadata.lock().await;
+        if let Some(track) = cache.get(&key, Instant::now()) { return Ok(track); }
+        let track = if let Some(id) = id {
+            self.track_id(&id).await?
+        } else {
+            let data = self.api("https://api.spotify.com/v1/search", &[("q", input), ("type", "track"), ("limit", "1")]).await?;
+            let track = data.pointer("/tracks/items/0").ok_or_else(|| ResolverError::NotFound {
+                service: SERVICE, query: input.into(),
+            })?;
+            parse_track(track)?
+        };
+        cache.insert(key, track.clone(), Instant::now());
+        Ok(track)
     }
 
     async fn playlist(&self, input: &str) -> Result<Vec<TrackMetadata>, ResolverError> {
@@ -192,7 +225,7 @@ impl MetadataProvider for Spotify {
             let uri = required_string(item, "/uri", SERVICE)?;
             let id = spotify_id(&uri, "track")?.ok_or_else(|| parse_error(SERVICE, "invalid track URI"))?;
             // Fetch individual embeds for covers and unambiguous artist names.
-            tracks.push(self.track_id(&id).await?);
+            tracks.push(self.track(&id).await?);
         }
         Ok(tracks)
     }
@@ -212,6 +245,94 @@ fn cooldown_seconds(retry_at: Option<Instant>, now: Instant) -> Option<u64> {
 fn embed_entity(data: &Value) -> Result<Value, ResolverError> {
     data.pointer("/props/pageProps/state/data/entity").cloned()
         .filter(|v| v.is_object()).ok_or_else(|| parse_error(SERVICE, "embed entity missing"))
+}
+
+#[cfg(test)]
+mod metadata_cache_tests {
+    use super::*;
+
+    fn fixture() -> TrackMetadata {
+        parse_track(&serde_json::json!({
+            "uri": format!("spotify:track:{BOOTSTRAP_TRACK}"), "name": "Fixture",
+            "duration_ms": 123000, "artists": [{"name": "Artist"}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn ttl_is_fixed_and_expires_at_boundary() {
+        let now = Instant::now();
+        let mut cache = MetadataCache::default();
+        cache.insert("key".into(), fixture(), now);
+        assert!(cache.get("key", now + METADATA_TTL - Duration::from_nanos(1)).is_some());
+        assert!(cache.get("key", now + METADATA_TTL).is_none());
+        assert!(cache.0.is_empty());
+    }
+
+    #[test]
+    fn capacity_evicts_oldest_and_replacement_does_not_grow() {
+        let now = Instant::now();
+        let mut cache = MetadataCache::default();
+        for i in 0..METADATA_CAPACITY {
+            cache.insert(i.to_string(), fixture(), now);
+        }
+        cache.insert("0".into(), fixture(), now);
+        assert_eq!(cache.0.len(), METADATA_CAPACITY);
+        cache.insert("extra".into(), fixture(), now);
+        assert_eq!(cache.0.len(), METADATA_CAPACITY);
+        assert!(cache.get("1", now).is_none());
+        assert!(cache.get("0", now).is_some());
+        cache.insert("fresh".into(), fixture(), now + METADATA_TTL);
+        assert_eq!(cache.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn normalized_hits_work_during_cooldown_and_errors_are_not_cached() {
+        let spotify = Spotify::new().unwrap();
+        let now = Instant::now();
+        *spotify.api_retry_at.lock().await = Some(now + Duration::from_secs(41000));
+        *spotify.embed_retry_at.lock().await = Some(now + Duration::from_secs(41000));
+        for input in [BOOTSTRAP_TRACK, "Exact Query"] {
+            assert!(matches!(spotify.track(input).await, Err(ResolverError::RateLimited { .. })));
+        }
+        assert!(spotify.metadata.lock().await.0.is_empty());
+        {
+            let mut cache = spotify.metadata.lock().await;
+            cache.insert(format!("track:{BOOTSTRAP_TRACK}"), fixture(), now);
+            cache.insert("query:Exact Query".into(), fixture(), now);
+        }
+        for input in [
+            format!(" {BOOTSTRAP_TRACK} "),
+            format!("spotify:track:{BOOTSTRAP_TRACK}"),
+            format!("https://open.spotify.com/track/{BOOTSTRAP_TRACK}?si=fixture"),
+            " Exact Query ".into(),
+        ] {
+            assert_eq!(spotify.track(&input).await.unwrap().title, "Fixture");
+        }
+        for input in ["exact query", "Exact  Query"] {
+            assert!(matches!(spotify.track(input).await, Err(ResolverError::RateLimited { .. })));
+        }
+        assert_eq!(spotify.metadata.lock().await.0.len(), 2);
+        assert!(spotify.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiters_recheck_metadata_after_resolution() {
+        let spotify = std::sync::Arc::new(Spotify::new().unwrap());
+        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(41000));
+        let mut cache = spotify.metadata.lock().await;
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let spotify = spotify.clone();
+            waiters.push(tokio::spawn(async move { spotify.track(BOOTSTRAP_TRACK).await }));
+        }
+        tokio::task::yield_now().await;
+        assert!(waiters.iter().all(|waiter| !waiter.is_finished()));
+        cache.insert(format!("track:{BOOTSTRAP_TRACK}"), fixture(), Instant::now());
+        drop(cache);
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap().unwrap().title, "Fixture");
+        }
+    }
 }
 
 #[cfg(test)]
