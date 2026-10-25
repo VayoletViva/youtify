@@ -29,8 +29,8 @@ export function contrast(a: RGB, b: RGB): number {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 }
 
-export function palette(seed: RGB): Record<string, string> {
-  const scheme = new SchemeTonalSpot(Hct.fromInt(argbFromRgb(...seed)), true, 0);
+export function palette(seed: RGB, dark = true): Record<string, string> {
+  const scheme = new SchemeTonalSpot(Hct.fromInt(argbFromRgb(...seed)), dark, 0);
   const colors = new MaterialDynamicColors();
   const roles = [
     'background', 'onBackground', 'primary', 'onPrimary', 'primaryContainer', 'onPrimaryContainer',
@@ -66,15 +66,26 @@ export class DynamicTheme {
   private readonly cache = new Map<string, RGB>();
   private generation = 0;
   private cancel: (() => void) | undefined;
+  private seed: RGB = FALLBACK;
+  private readonly scheme = window.matchMedia('(prefers-color-scheme: dark)');
 
   constructor() {
     this.canvas.width = this.canvas.height = 64;
     this.canvas.hidden = true;
     this.apply(FALLBACK);
+    requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add('theme-ready')));
+    // Follow the system light/dark setting, as Android's Material You does.
+    this.scheme.addEventListener('change', () => this.apply(this.seed));
   }
 
   private apply(seed: RGB): void {
-    for (const [name, value] of Object.entries(palette(seed))) document.documentElement.style.setProperty(name, value);
+    this.seed = seed;
+    const dark = this.scheme.matches;
+    const root = document.documentElement;
+    const colors = palette(seed, dark);
+    for (const [name, value] of Object.entries(colors)) root.style.setProperty(name, value);
+    root.style.colorScheme = dark ? 'dark' : 'light';
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colors['--md-sys-color-surface']);
   }
 
   async update(raw: string | null): Promise<void> {

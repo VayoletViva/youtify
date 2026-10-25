@@ -14,11 +14,11 @@ primary-fixed primary-fixed-dim on-primary-fixed on-primary-fixed-variant
 secondary-fixed secondary-fixed-dim on-secondary-fixed on-secondary-fixed-variant
 tertiary-fixed tertiary-fixed-dim on-tertiary-fixed on-tertiary-fixed-variant`.split(/\s+/);
 
-for (const rgb of [[255, 0, 0], [0, 255, 0], [0, 0, 255], [80, 120, 170], [0, 0, 0], [255, 255, 255], [128, 128, 128], [190, 222, 146], [253.5, 3.5, 2]] as RGB[]) {
-  const colors = palette(rgb);
+for (const dark of [true, false]) for (const rgb of [[255, 0, 0], [0, 255, 0], [0, 0, 255], [80, 120, 170], [0, 0, 0], [255, 255, 255], [128, 128, 128], [190, 222, 146], [253.5, 3.5, 2]] as RGB[]) {
+  const colors = palette(rgb, dark);
   const parse = (value: string): RGB => value.match(/\d+/g)!.map(Number) as unknown as RGB;
   assert(Object.keys(colors).length === roles.length, 'Complete role set');
-  const scheme = new SchemeTonalSpot(Hct.fromInt(argbFromRgb(...rgb)), true, 0);
+  const scheme = new SchemeTonalSpot(Hct.fromInt(argbFromRgb(...rgb)), dark, 0);
   const official = new MaterialDynamicColors();
   const officialRoles = [...official.allColors, official.surfaceVariant(), official.shadow(), official.scrim(), official.surfaceTint()];
   for (const role of roles) {

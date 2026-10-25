@@ -2,6 +2,7 @@
 pub mod decoder;
 mod engine;
 mod gapless;
+pub mod hls;
 pub mod streamer;
 
 pub use engine::AudioEngine;

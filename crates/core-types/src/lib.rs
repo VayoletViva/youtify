@@ -40,6 +40,9 @@ pub struct StreamInfo {
     pub source: StreamSource,
     /// Unix timestamp in seconds, if reported by the provider.
     pub expires_at: Option<u64>,
+    /// `stream_url` is an HLS media playlist rather than a single media file.
+    #[serde(default)]
+    pub hls: bool,
 }
 
 #[derive(Debug, Error)]

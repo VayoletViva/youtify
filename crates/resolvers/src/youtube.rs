@@ -90,7 +90,7 @@ impl StreamResolver for YouTube {
                     // cause 403 responses. Probe only headers and drop the body.
                     match http::probe_media(&self.client, &stream.url, SERVICE, self.native_only).await {
                         Ok(_) => return Ok(StreamInfo {
-                            stream_url: stream.url.clone(),
+                            stream_url: stream.url.clone(), hls: false,
                             codec: if stream.codec == YtCodec::Opus { AudioCodec::Opus } else { AudioCodec::Aac },
                             bitrate: Some(stream.bitrate), source: StreamSource::YouTube,
                             expires_at: match (expires_at(&stream.url), u64::try_from(player.valid_until.unix_timestamp()).ok()) {

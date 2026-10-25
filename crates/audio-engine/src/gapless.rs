@@ -149,7 +149,9 @@ pub(crate) fn prepare(metadata: TrackMetadata, stream: StreamInfo, backend: Arc<
                     break;
                 }
             };
-            if let Some(duration) = source.total_duration() {
+            // Only a source opened at zero reports the whole track. Fragmented
+            // MP4 (HLS) may report zero; keep the provider duration then.
+            if let Some(duration) = source.total_duration().filter(|d| position.is_zero() && !d.is_zero()) {
                 track.duration_ms.store(duration.as_millis().min(u64::MAX as u128) as u64, Ordering::Relaxed);
             }
             let mut source = UniformSourceIterator::new(source, channels, rate);

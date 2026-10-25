@@ -125,7 +125,7 @@ Commands:
   for search, or a full playlist; YouTube has no public metadata-search contract.
 * `play_track(track)`: prefers SoundCloud for SoundCloud tracks, falling back to
   YouTube; other tracks try YouTube first, then SoundCloud. Native mode selects
-  progressive MP3/AAC; the optional FFmpeg mode also permits HLS/Opus;
+  AAC/MP3, including SoundCloud HLS; the optional FFmpeg mode also permits Opus;
   reports submission to the audio engine, not completion of asynchronous decoding.
 * `control_playback(action, value)`: pause/resume/skip/seek/volume,
   case-insensitive. Seek is in **milliseconds**, volume is **0..1**.
@@ -161,7 +161,7 @@ The database lives in Tauri's application-data directory, not the working direct
   channel misreported as `Player worker stopped`. The UI ignores obsolete Play
   replies. Resolver tasks are joined so a task failure is reported and does not
   leave resolution permanently busy. This does not repair provider/network errors.
-  SoundCloud HLS requires the optional desktop FFmpeg mode described above.
+  SoundCloud HLS AAC/MP3 plays natively (including Android) via `audio_engine::hls`.
 * Manual regression checks: click A then B while A resolves; only B's reply should
   update the status. Repeat a single SoundCloud track and capture the exact error
   if resolution fails. During an API 429, try one direct Spotify track link;
@@ -176,9 +176,11 @@ The database lives in Tauri's application-data directory, not the working direct
 * Search results are limited to 2,000 imported tracks; normal playlist playback
   retains the first 100 as its in-memory session list. The UI renders results in
   pages of 40. Wave ranks the whole stored catalog without loading it all into UI.
-* Existing resolver defaults remain unchanged. New `new_native()` constructors
-  select AAC/progressive MP3, avoiding the built-in decoder's unsupported Opus/HLS.
-  No FFmpeg process is required in native mode. If providers offer only Opus or HLS
+* `new_native()` resolver constructors select AAC/MP3 (progressive or SoundCloud
+  HLS VOD), avoiding the built-in decoder's unsupported Opus. HLS is read
+  sequentially (init map + segments, one prefetched); seeking reopens at the
+  containing segment. Encrypted, live and master playlists are rejected.
+  No FFmpeg process is required in native mode. If providers offer only Opus
   streams, native playback fails visibly instead of selecting an unsupported
   format; use desktop FFmpeg playback for those formats. Restricted
   streams remain unavailable in either mode.

@@ -5,7 +5,7 @@ use regex::Regex;
 use reqwest::Client;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{collections::HashMap, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
 use crate::{http, parse_error, required_string, string};
 const SERVICE: &str = "Spotify";
@@ -13,6 +13,19 @@ const SERVICE: &str = "Spotify";
 const BOOTSTRAP_TRACK: &str = "4cOdK2wGLETKBW3PvgPWqT";
 const METADATA_TTL: Duration = Duration::from_secs(5 * 60);
 const METADATA_CAPACITY: usize = 64;
+const EMBED: &str = "embed";
+
+/// Spotify rate-limits anonymous Web API endpoints independently: `/v1/tracks`
+/// can return a day-long 429 while `/v1/search` still answers. One shared
+/// cooldown would block every working endpoint with the longest limit.
+fn api_bucket(url: &url::Url) -> &'static str {
+    match url.path_segments().and_then(|mut s| s.nth(1)) {
+        Some("search") => "api:search",
+        Some("tracks") => "api:tracks",
+        Some("playlists") => "api:playlists",
+        _ => "api:other",
+    }
+}
 
 #[derive(Default)]
 struct MetadataCache(Vec<(String, Instant, TrackMetadata)>);
@@ -34,29 +47,39 @@ pub struct Spotify {
     client: Client,
     session: Mutex<Option<(String, u64)>>,
     session_refresh: Mutex<()>,
-    api_retry_at: Mutex<Option<Instant>>,
-    embed_retry_at: Mutex<Option<Instant>>,
+    /// Retry deadlines keyed by `EMBED` or an `api_bucket`.
+    cooldowns: Mutex<HashMap<&'static str, Instant>>,
     metadata: Mutex<MetadataCache>,
 }
 
 impl Spotify {
     pub fn new() -> Result<Self, ResolverError> {
         Ok(Self { client: http::client()?, session: Mutex::new(None), session_refresh: Mutex::new(()),
-            api_retry_at: Mutex::new(None), embed_retry_at: Mutex::new(None),
-            metadata: Mutex::new(MetadataCache::default()) })
+            cooldowns: Mutex::new(HashMap::new()), metadata: Mutex::new(MetadataCache::default()) })
     }
 
-    async fn text(&self, request: reqwest::RequestBuilder, api: bool) -> Result<String, ResolverError> {
-        // Each origin has its own cooldown: an API 429 must not locally block
-        // open.spotify.com embeds. Both origins still respect their own 429.
-        // Do not sleep in a search request or retry 429 in a tight loop.
-        let mut retry_at = if api { self.api_retry_at.lock().await } else { self.embed_retry_at.lock().await };
-        if let Some(seconds) = cooldown_seconds(*retry_at, Instant::now()) {
-            return Err(ResolverError::RateLimited { service: SERVICE, retry_after_secs: seconds });
+    async fn check_cooldown(&self, bucket: &'static str) -> Result<(), ResolverError> {
+        match cooldown_seconds(self.cooldowns.lock().await.get(bucket).copied(), Instant::now()) {
+            Some(seconds) => Err(ResolverError::RateLimited { service: SERVICE, retry_after_secs: seconds }),
+            None => Ok(()),
         }
+    }
+
+    async fn set_cooldown(&self, bucket: &'static str, duration: Duration) {
+        if let Some(deadline) = Instant::now().checked_add(duration) {
+            let mut cooldowns = self.cooldowns.lock().await;
+            let entry = cooldowns.entry(bucket).or_insert(deadline);
+            *entry = (*entry).max(deadline);
+        }
+    }
+
+    async fn text(&self, request: reqwest::RequestBuilder, bucket: &'static str) -> Result<String, ResolverError> {
+        // Respect each endpoint's own 429 without blocking the others.
+        // Do not sleep in a search request or retry 429 in a tight loop.
+        self.check_cooldown(bucket).await?;
         let result = http::text(request, SERVICE).await;
         if let Err(ResolverError::RateLimited { retry_after_secs, .. }) = &result {
-            *retry_at = Instant::now().checked_add(Duration::from_secs(*retry_after_secs));
+            self.set_cooldown(bucket, Duration::from_secs(*retry_after_secs)).await;
         }
         result
     }
@@ -67,7 +90,7 @@ impl Spotify {
     }
 
     async fn embed_data(&self, kind: &str, id: &str) -> Result<Value, ResolverError> {
-        let html = self.text(self.client.get(format!("https://open.spotify.com/embed/{kind}/{id}")), false).await?;
+        let html = self.text(self.client.get(format!("https://open.spotify.com/embed/{kind}/{id}")), EMBED).await?;
         self.parse_embed(&html).await
     }
 
@@ -81,7 +104,7 @@ impl Spotify {
         if let Some(status) = data.pointer("/props/pageProps/status").and_then(Value::as_u64)
             .filter(|status| (400..600).contains(status)) {
             if status == 429 {
-                *self.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(60));
+                self.set_cooldown(EMBED, Duration::from_secs(60)).await;
                 return Err(ResolverError::RateLimited { service: SERVICE, retry_after_secs: 60 });
             }
             return Err(ResolverError::Http { service: SERVICE, status: status as u16 });
@@ -129,13 +152,12 @@ impl Spotify {
         if url.host_str() != Some("api.spotify.com") {
             return Err(parse_error(SERVICE, "unexpected API pagination host"));
         }
+        let bucket = api_bucket(&url);
         // Check before bootstrapping a token, which itself would fetch an embed.
-        if let Some(seconds) = cooldown_seconds(*self.api_retry_at.lock().await, Instant::now()) {
-            return Err(ResolverError::RateLimited { service: SERVICE, retry_after_secs: seconds });
-        }
+        self.check_cooldown(bucket).await?;
         for attempt in 0..2 {
             let token = self.token().await?;
-            let result = self.text(self.client.get(url.clone()).bearer_auth(&token).query(query), true).await
+            let result = self.text(self.client.get(url.clone()).bearer_auth(&token).query(query), bucket).await
                 .and_then(|body| serde_json::from_str::<Value>(&body).map_err(|e| parse_error(SERVICE, e.to_string())));
             if matches!(result, Err(ResolverError::Http { status: 401, .. })) {
                 self.invalidate_token(&token).await;
@@ -194,41 +216,50 @@ impl MetadataProvider for Spotify {
     async fn playlist(&self, input: &str) -> Result<Vec<TrackMetadata>, ResolverError> {
         let id = spotify_id(input.trim(), "playlist")?
             .ok_or_else(|| ResolverError::InvalidInput("expected Spotify playlist URL or ID".into()))?;
+        // One embed request already lists the tracks with exact durations.
+        // The anonymous Web API only adds pagination and is often limited for
+        // hours, so its failure falls back to the embed list instead of failing.
         let entity = self.embed("playlist", &id).await?;
+        let embedded = embed_playlist_tracks(&entity)?;
+        match self.api_playlist(&id).await {
+            Ok(tracks) if tracks.len() >= embedded.len() => Ok(tracks),
+            Err(error @ ResolverError::Http { status: 451, .. }) => Err(error),
+            _ if !embedded.is_empty() => Ok(embedded),
+            Ok(tracks) => Ok(tracks),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Spotify {
+    async fn api_playlist(&self, id: &str) -> Result<Vec<TrackMetadata>, ResolverError> {
         let mut next = Some(format!("https://api.spotify.com/v1/playlists/{id}/tracks?limit=100"));
         let mut tracks = Vec::new();
         let mut pages = std::collections::HashSet::new();
-        let mut api_failed = false;
         while let Some(url) = next {
             if !pages.insert(url.clone()) { return Err(parse_error(SERVICE, "pagination loop")); }
-            let page = match self.api(&url, &[]).await {
-                Ok(page) => page,
-                Err(error @ ResolverError::RateLimited { .. }) => return Err(error),
-                Err(error @ ResolverError::Http { status: 451, .. }) => return Err(error),
-                Err(_) if tracks.is_empty() => { api_failed = true; break; }
-                Err(error) => return Err(error),
-            };
+            let page = self.api(&url, &[]).await?;
             let items = page["items"].as_array().ok_or_else(|| parse_error(SERVICE, "playlist items missing"))?;
-            for item in items { tracks.push(parse_track(&item["track"])?); }
+            // Local files and removed tracks have no usable metadata; skip them.
+            tracks.extend(items.iter().filter_map(|item| parse_track(&item["track"]).ok()));
             next = string(&page, "/next");
-            if next.is_none() && page["total"].as_u64() != Some(tracks.len() as u64) {
-                return Err(parse_error(SERVICE, "incomplete API playlist"));
-            }
-        }
-        if !api_failed { return Ok(tracks); }
-        let items = entity["trackList"].as_array().ok_or_else(|| parse_error(SERVICE, "embed trackList missing"))?;
-        if entity["totalTrackCount"].as_u64() != Some(items.len() as u64) {
-            return Err(ResolverError::Unavailable { service: SERVICE,
-                message: "embed playlist is truncated or its total is unknown; anonymous pagination denied".into() });
-        }
-        for item in items {
-            let uri = required_string(item, "/uri", SERVICE)?;
-            let id = spotify_id(&uri, "track")?.ok_or_else(|| parse_error(SERVICE, "invalid track URI"))?;
-            // Fetch individual embeds for covers and unambiguous artist names.
-            tracks.push(self.track(&id).await?);
         }
         Ok(tracks)
     }
+}
+
+/// Embed playlist rows carry uri, title, a ", "-joined artist subtitle and
+/// an exact duration, but no per-track cover. Unplayable rows are skipped.
+fn embed_playlist_tracks(entity: &Value) -> Result<Vec<TrackMetadata>, ResolverError> {
+    let items = entity["trackList"].as_array().ok_or_else(|| parse_error(SERVICE, "embed trackList missing"))?;
+    Ok(items.iter().filter(|item| item["isPlayable"].as_bool() != Some(false)).filter_map(|item| {
+        let id = required_string(item, "/uri", SERVICE).ok().filter(|uri| uri.starts_with("spotify:track:"))?;
+        let artists: Vec<String> = string(item, "/subtitle")?.split(',')
+            .map(|a| a.trim_matches(|c: char| c.is_whitespace()).to_owned()).filter(|a| !a.is_empty()).collect();
+        let duration_ms = item["duration"].as_u64().filter(|d| *d > 0)?;
+        Some(TrackMetadata { id, title: string(item, "/title")?, artists, duration_ms,
+            album: None, cover_url: None, isrc: None })
+    }).filter(|track| !track.artists.is_empty()).collect())
 }
 
 fn session_token(session: &Option<(String, u64)>, now: u64) -> Option<String> {
@@ -289,8 +320,8 @@ mod metadata_cache_tests {
     async fn normalized_hits_work_during_cooldown_and_errors_are_not_cached() {
         let spotify = Spotify::new().unwrap();
         let now = Instant::now();
-        *spotify.api_retry_at.lock().await = Some(now + Duration::from_secs(41000));
-        *spotify.embed_retry_at.lock().await = Some(now + Duration::from_secs(41000));
+        spotify.set_cooldown("api:search", Duration::from_secs(41000)).await;
+        spotify.set_cooldown(EMBED, Duration::from_secs(41000)).await;
         for input in [BOOTSTRAP_TRACK, "Exact Query"] {
             assert!(matches!(spotify.track(input).await, Err(ResolverError::RateLimited { .. })));
         }
@@ -318,7 +349,7 @@ mod metadata_cache_tests {
     #[tokio::test]
     async fn concurrent_waiters_recheck_metadata_after_resolution() {
         let spotify = std::sync::Arc::new(Spotify::new().unwrap());
-        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(41000));
+        spotify.set_cooldown(EMBED, Duration::from_secs(41000)).await;
         let mut cache = spotify.metadata.lock().await;
         let mut waiters = Vec::new();
         for _ in 0..8 {
@@ -342,12 +373,58 @@ mod cooldown_tests {
     #[tokio::test]
     async fn api_limit_does_not_set_embed_limit_or_bootstrap_a_token() {
         let spotify = Spotify::new().unwrap();
-        *spotify.api_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(41_000));
+        spotify.set_cooldown("api:search", Duration::from_secs(41_000)).await;
         let result = spotify.api("https://api.spotify.com/v1/search", &[]).await;
         assert!(matches!(result, Err(ResolverError::RateLimited { retry_after_secs, .. })
             if retry_after_secs > 40_900 && retry_after_secs <= 41_000));
-        assert!(spotify.embed_retry_at.lock().await.is_none());
+        assert!(!spotify.cooldowns.lock().await.contains_key(EMBED));
         assert!(spotify.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn day_long_tracks_limit_does_not_block_search() {
+        // Observed: /v1/tracks 429 with Retry-After ~76000 while /v1/search answered 200.
+        let spotify = Spotify::new().unwrap();
+        spotify.set_cooldown("api:tracks", Duration::from_secs(76_000)).await;
+        spotify.set_cooldown("api:playlists", Duration::from_secs(76_000)).await;
+        assert!(spotify.check_cooldown("api:search").await.is_ok());
+        assert!(spotify.check_cooldown(EMBED).await.is_ok());
+        assert!(matches!(spotify.check_cooldown("api:tracks").await, Err(ResolverError::RateLimited { .. })));
+        // A shorter later limit never shortens an existing deadline.
+        spotify.set_cooldown("api:tracks", Duration::from_secs(5)).await;
+        assert!(matches!(spotify.check_cooldown("api:tracks").await,
+            Err(ResolverError::RateLimited { retry_after_secs, .. }) if retry_after_secs > 75_000));
+    }
+
+    #[test]
+    fn api_buckets_follow_endpoint() {
+        for (url, bucket) in [
+            ("https://api.spotify.com/v1/search?q=a", "api:search"),
+            ("https://api.spotify.com/v1/tracks/x", "api:tracks"),
+            ("https://api.spotify.com/v1/playlists/x/tracks?limit=100", "api:playlists"),
+            ("https://api.spotify.com/v1/albums/x", "api:other"),
+        ] {
+            assert_eq!(api_bucket(&url::Url::parse(url).unwrap()), bucket);
+        }
+    }
+
+    #[test]
+    fn embed_playlist_rows_become_tracks() {
+        // Sanitized shape of a live playlist embed row (no totalTrackCount field).
+        let entity = serde_json::json!({"trackList": [
+            {"uri": "spotify:track:3301sy6RP2XMn67qrjzY0y", "title": "Lil Krazy",
+             "subtitle": "Yeat,\u{a0}Lyfestyle Corporation", "duration": 165000, "isPlayable": true},
+            {"uri": "spotify:track:2sFepQNyl1WjpROruP8bJ0", "title": "Housewife", "subtitle": "Tate McRae", "duration": 208810},
+            {"uri": "spotify:track:unplayable000000000000", "title": "Gone", "subtitle": "A", "duration": 1000, "isPlayable": false},
+            {"uri": "spotify:episode:x", "title": "Podcast", "subtitle": "B", "duration": 1000},
+            {"uri": "spotify:track:noduration00000000000", "title": "X", "subtitle": "C"}
+        ]});
+        let tracks = embed_playlist_tracks(&entity).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].artists, ["Yeat", "Lyfestyle Corporation"]);
+        assert_eq!(tracks[0].duration_ms, 165000);
+        assert_eq!(tracks[1].id, "spotify:track:2sFepQNyl1WjpROruP8bJ0");
+        assert!(matches!(embed_playlist_tracks(&serde_json::json!({})), Err(ResolverError::Parse { .. })));
     }
 
     #[test]
@@ -421,7 +498,7 @@ mod embed_tests {
     async fn expired_cache_cannot_bypass_bootstrap_restrictions() {
         let spotify = Spotify::new().unwrap();
         *spotify.session.lock().await = Some(("expired".into(), 1));
-        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(60));
+        spotify.set_cooldown(EMBED, Duration::from_secs(60)).await;
         assert!(matches!(spotify.token().await, Err(ResolverError::RateLimited { .. })));
     }
 
@@ -429,7 +506,7 @@ mod embed_tests {
     async fn concurrent_waiters_recheck_cache_after_refresh() {
         let spotify = std::sync::Arc::new(Spotify::new().unwrap());
         // Make any accidental bootstrap fail locally rather than contacting Spotify.
-        *spotify.embed_retry_at.lock().await = Some(Instant::now() + Duration::from_secs(60));
+        spotify.set_cooldown(EMBED, Duration::from_secs(60)).await;
         let refresh = spotify.session_refresh.lock().await;
         let mut waiters = Vec::new();
         for _ in 0..8 {
@@ -506,14 +583,14 @@ mod embed_tests {
             }}}))).await;
             if status == 429 {
                 assert!(matches!(result, Err(ResolverError::RateLimited { retry_after_secs: 60, .. })));
-                assert!(spotify.embed_retry_at.lock().await.is_some());
+                assert!(spotify.cooldowns.lock().await.contains_key(EMBED));
                 let result = spotify.embed("track", BOOTSTRAP_TRACK).await;
                 assert!(matches!(result, Err(ResolverError::RateLimited { .. })));
             } else {
                 assert!(matches!(result, Err(ResolverError::Http { status: actual, .. }) if actual == status));
-                assert!(spotify.embed_retry_at.lock().await.is_none());
+                assert!(!spotify.cooldowns.lock().await.contains_key(EMBED));
             }
-            assert!(spotify.api_retry_at.lock().await.is_none());
+            assert!(!spotify.cooldowns.lock().await.keys().any(|k| k.starts_with("api")));
             assert!(spotify.session.lock().await.is_none());
         }
     }

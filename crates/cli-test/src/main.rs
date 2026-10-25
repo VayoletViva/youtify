@@ -87,8 +87,8 @@ async fn play(args: &[String], spotify: &Spotify) -> Result<(), Box<dyn std::err
             Err(error) => { eprintln!("Resolver timeout: {error}"); None }
         });
         let stream = candidates.into_iter().find(|stream| ffmpeg ||
-            (stream.codec != core_types::AudioCodec::Opus && !stream.stream_url.to_ascii_lowercase().contains(".m3u8")))
-            .ok_or("no native-compatible stream; retry with --ffmpeg for Opus/HLS")?;
+            stream.codec != core_types::AudioCodec::Opus)
+            .ok_or("no native-compatible stream; retry with --ffmpeg for Opus")?;
         tracks.push((track, stream));
     }
     let engine = if ffmpeg { AudioEngine::with_decoder(Arc::new(FfmpegDecoder::new("ffmpeg")))? }

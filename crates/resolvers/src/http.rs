@@ -48,6 +48,16 @@ pub(crate) async fn probe_media(client: &Client, url: &str, service: &'static st
     Ok(())
 }
 
+/// HLS manifests are small text files and are not byte-range addressable;
+/// check that the signed URL answers with an M3U playlist.
+pub(crate) async fn probe_playlist(client: &Client, url: &str, service: &'static str) -> Result<(), ResolverError> {
+    let body = text(client.get(url), service).await?;
+    if !body.trim_start().starts_with("#EXTM3U") {
+        return Err(ResolverError::Unavailable { service, message: "HLS URL did not return a playlist".into() });
+    }
+    Ok(())
+}
+
 pub(crate) async fn json(request: RequestBuilder, service: &'static str) -> Result<Value, ResolverError> {
     let body = text(request, service).await?;
     serde_json::from_str(&body).map_err(|e| crate::parse_error(service, e.to_string()))

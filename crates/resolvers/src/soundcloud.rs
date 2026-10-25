@@ -105,8 +105,11 @@ impl SoundCloud {
             let mime = t.pointer("/format/mime_type")?.as_str()?;
             let codec = if mime.contains("opus") { AudioCodec::Opus }
                 else if mime == "audio/mp4; codecs=\"mp4a.40.2\"" { AudioCodec::Aac }
-                else if mime.contains("mpeg") { AudioCodec::Mp3 } else { return None; };
-            if self.native_only && (codec != AudioCodec::Mp3 || protocol != "progressive") { return None; }
+                // "audio/mpegurl" is an adaptive variant (observed HTTP 404), not MP3.
+                else if mime == "audio/mpeg" { AudioCodec::Mp3 } else { return None; };
+            // Most uploads now offer only HLS AAC (fMP4); the native decoder reads
+            // those sequentially. Opus still needs FFmpeg.
+            if self.native_only && codec == AudioCodec::Opus { return None; }
             Some((t, codec, protocol))
         }).collect();
         formats.sort_by_key(|(_, codec, protocol)| (
@@ -115,7 +118,8 @@ impl SoundCloud {
         ));
         let auth = string(value, "/track_authorization");
         let mut last_error = None;
-        for (format, codec, _) in formats {
+        for (format, codec, protocol) in formats {
+            let hls = protocol == "hls";
             let Some(endpoint) = format["url"].as_str() else { continue };
             let params: Vec<_> = auth.as_deref().map(|a| ("track_authorization", a)).into_iter().collect();
             let result = match self.api(endpoint, &params, TRANSCODING).await {
@@ -131,9 +135,11 @@ impl SoundCloud {
                 last_error = Some(error);
                 continue;
             }
-            match http::probe_media(&self.client, &url, MEDIA, self.native_only).await {
+            let probe = if hls { http::probe_playlist(&self.client, &url, MEDIA).await }
+                else { http::probe_media(&self.client, &url, MEDIA, self.native_only).await };
+            match probe {
                 Ok(_) => return Ok(StreamInfo {
-                    expires_at: expires_at(&url), stream_url: url, codec,
+                    expires_at: expires_at(&url), stream_url: url, codec, hls,
                     bitrate: format["bitrate"].as_u64().and_then(|b| u32::try_from(b).ok()),
                     source: StreamSource::SoundCloud,
                 }),
@@ -143,7 +149,7 @@ impl SoundCloud {
         }
         Err(last_error.unwrap_or_else(|| ResolverError::Unavailable {
             service: SERVICE, message: if self.native_only {
-                "no full-length progressive MP3 within duration tolerance; HLS/Opus streams are not supported by the native decoder"
+                "no full-length AAC/MP3 stream within duration tolerance; Opus is not supported by the native decoder"
             } else {
                 "no full-length Opus/AAC/MP3 stream within duration tolerance"
             }.into(),
@@ -395,15 +401,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_mode_does_not_request_hls() {
+    async fn native_mode_rejects_opus_and_adaptive_variants() {
         let resolver = SoundCloud::new_native().unwrap();
-        let value = json!({"policy": "ALLOW", "streamable": true, "media": {"transcodings": [{
-            "duration": 10000, "format": {"protocol": "hls", "mime_type": "audio/mpeg"},
-            "url": "https://example.invalid/private?token=SECRET"
-        }]}});
-        let error = resolver.stream(&value, 10000).await.unwrap_err();
-        assert!(matches!(error, ResolverError::Unavailable { .. }));
-        assert!(error.to_string().contains("no full-length progressive MP3"));
+        for mime in ["audio/ogg; codecs=\"opus\"", "audio/mpegurl"] {
+            let value = json!({"policy": "ALLOW", "streamable": true, "media": {"transcodings": [{
+                "duration": 10000, "format": {"protocol": "hls", "mime_type": mime},
+                "url": "https://example.invalid/private?token=SECRET"
+            }]}});
+            let error = resolver.stream(&value, 10000).await.unwrap_err();
+            assert!(matches!(error, ResolverError::Unavailable { .. }));
+            assert!(error.to_string().contains("Opus is not supported"));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_mode_selects_hls_aac_and_mp3() {
+        let resolver = SoundCloud::new_native().unwrap();
+        for mime in ["audio/mp4; codecs=\"mp4a.40.2\"", "audio/mpeg"] {
+            let value = json!({"policy": "ALLOW", "streamable": true, "media": {"transcodings": [{
+                "duration": 10000, "format": {"protocol": "hls", "mime_type": mime},
+                "url": "https://example.invalid/never-requested?token=SECRET"
+            }]}});
+            // Host validation proves selection without making a network request.
+            assert!(matches!(resolver.stream(&value, 10000).await.unwrap_err(),
+                ResolverError::Parse { service: TRANSCODING, .. }));
+        }
     }
 
     #[tokio::test]
@@ -421,9 +443,8 @@ mod tests {
         for protocol in ["hls", "progressive"] {
             let mut candidate = value.clone();
             candidate["media"]["transcodings"][0]["format"]["protocol"] = json!(protocol);
-            let error = native.stream(&candidate, 10000).await.unwrap_err();
-            assert!(matches!(error, ResolverError::Unavailable { .. }));
-            assert!(error.to_string().contains("no full-length progressive MP3"));
+            assert!(matches!(native.stream(&candidate, 10000).await.unwrap_err(),
+                ResolverError::Parse { service: TRANSCODING, .. }));
         }
         for (pointer, replacement) in [
             ("/policy", json!("BLOCK")),

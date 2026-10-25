@@ -1,6 +1,6 @@
 //! Replaceable decoder backend: native Rodio/Symphonia by default, explicit
 //! FFmpeg opt-in for WebM/Opus, HLS and servers without HTTP Range support.
-use crate::{streamer::HttpReader, EngineError, Result};
+use crate::{hls::HlsReader, streamer::HttpReader, EngineError, Result};
 use core_types::{AudioCodec, StreamInfo};
 use rodio::{Decoder, Source};
 use std::{io::{BufReader, Read}, path::PathBuf, process::{Child, ChildStdout, Command, Stdio},
@@ -27,6 +27,16 @@ impl DecoderBackend for NativeDecoder {
         cancelled: Arc<AtomicBool>) -> Result<AudioSource> {
         if stream.codec == AudioCodec::Opus {
             return Err(EngineError::Message("Opus needs an external DecoderBackend; CLI: --ffmpeg".into()));
+        }
+        if stream.hls {
+            // Forward-only stream: start at the segment containing `position`,
+            // then discard the remaining offset as decoded frames.
+            let (reader, skip) = HlsReader::open(self.client.clone(), &stream.stream_url, runtime.clone(), cancelled, position)?;
+            let hint = if stream.codec == AudioCodec::Mp3 { "mp3" } else { "mp4" };
+            let decoder = Decoder::builder().with_data(BufReader::new(reader))
+                .with_seekable(false).with_hint(hint).with_gapless(true).build()
+                .map_err(|e| EngineError::Message(format!("native HLS decode failed: {e}")))?;
+            return Ok(Box::new(decoder.skip_duration(skip)));
         }
         let reader = HttpReader::open(self.client.clone(), stream.stream_url.clone(), runtime.clone(), cancelled)?;
         let length = reader.len();

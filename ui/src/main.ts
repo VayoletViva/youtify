@@ -40,7 +40,7 @@ function all<T extends HTMLElement>(selector: string): T[] {
 const theme = new DynamicTheme();
 const sheet = element<HTMLDialogElement>('player-sheet');
 const query = element<HTMLInputElement>('query');
-const searchButton = element<HTMLButtonElement>('search-submit');
+let searching = false;
 const status = element('app-status');
 const toast = element('toast');
 let state: Snapshot | undefined;
@@ -53,18 +53,40 @@ let artwork: string | null | undefined;
 let activeId: string | null | undefined;
 let waveBusy = false;
 let playRequest = 0;
+const noteIcon = document.querySelector('.cover-fallback')!.cloneNode(true);
+const titles: Record<string, string> = { home: 'Главная', search: 'Поиск', queue: 'Очередь' };
+const sourceValue = (): string => document.querySelector<HTMLInputElement>('input[name="source"]:checked')?.value ?? 'spotify';
+const placeholders: Record<string, string> = {
+  spotify: 'Трек, исполнитель или ссылка', soundcloud: 'Трек или ссылка SoundCloud',
+  'spotify-playlist': 'Ссылка на плейлист Spotify', 'soundcloud-playlist': 'Ссылка на плейлист SoundCloud',
+};
+/** Paint the M3 active track; WebKit has no ::range-progress. */
+function sliderFill(slider: HTMLInputElement): void {
+  const max = Number(slider.max) || 1;
+  slider.style.setProperty('--fill', `${(Number(slider.value) / max) * 100}%`);
+}
 
 const formatTime = (ms: number): string => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 };
+/** Short Russian explanations for known backend errors; the raw text stays visible in app-status. */
+const knownErrors: [RegExp, string][] = [
+  [/HLS: (encrypted|master|live|byte-range)/, 'Этот поток SoundCloud защищён или устроен нестандартно. Ищем другой источник.'],
+  [/native (HLS )?decode failed|Opus needs an external/, 'Встроенный декодер не справился с форматом этого трека. Попробуй другой трек или источник.'],
+  [/HTTP 403/, 'Сервис отказал в доступе к потоку (403). Возможно, ссылка устарела — повтори воспроизведение.'],
+  [/transport error|download failed|truncated range|timed out|timeout/i, 'Проблема с сетью при загрузке потока. Проверь подключение и повтори.'],
+  [/no full-length|no match for/, 'Не нашли полную версию трека на YouTube или SoundCloud.'],
+];
 function errorText(message: unknown): string {
   const text = String(message);
   const limit = text.match(/Spotify: HTTP 429 \(rate limited\); retry in (\d+) seconds/);
-  if (!limit) return text;
-  const minutes = Math.ceil(Number(limit[1]) / 60);
-  const wait = minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`;
-  return `Spotify ограничил запросы. Повторная попытка не раньше чем через ${wait}. Это срок сервиса, а не таймер плеера. Поиск по названию использует анонимный API; прямая ссылка на трек может работать отдельно.`;
+  if (limit) {
+    const minutes = Math.ceil(Number(limit[1]) / 60);
+    const wait = minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`;
+    return `Spotify временно ограничил этот запрос (ещё ${wait}). Поиск и ссылки на треки работают отдельно — попробуй их.`;
+  }
+  return knownErrors.find(([pattern]) => pattern.test(text))?.[1] ?? text;
 }
 function notify(message: unknown): void {
   const text = errorText(message);
@@ -107,13 +129,11 @@ function trackRow(track: TrackMetadata): HTMLButtonElement {
   button.classList.toggle('current', state?.track?.id === track.id);
   button.setAttribute('aria-label', `Воспроизвести ${track.title}, ${track.artists.join(', ')}`);
   const cover = document.createElement('span');
-  cover.className = 'cover-frame small';
+  cover.className = 'cover small';
   const image = document.createElement('img');
   image.alt = ''; image.loading = 'lazy'; image.decoding = 'async';
   setCover(image, track.cover_url);
-  const fallback = document.createElement('span');
-  fallback.className = 'cover-fallback'; fallback.textContent = '♪'; fallback.setAttribute('aria-hidden', 'true');
-  cover.append(image, fallback);
+  cover.append(image, noteIcon.cloneNode(true));
   const copy = document.createElement('span'); copy.className = 'track-copy';
   const title = document.createElement('strong'); title.textContent = track.title;
   const artists = document.createElement('span'); artists.textContent = track.artists.join(', ');
@@ -150,9 +170,9 @@ function render(next: Snapshot): void {
   document.body.classList.toggle('playing', Boolean(track && !next.paused));
   for (const button of all<HTMLButtonElement>('.play-toggle')) {
     button.disabled = !track;
-    button.textContent = next.paused || !track ? '▶' : 'Ⅱ';
-    button.setAttribute('aria-label', next.paused || !track ? 'Продолжить' : 'Пауза');
+    button.setAttribute('aria-label', next.paused || !track ? 'Воспроизвести' : 'Пауза');
   }
+  element('mini-progress-bar').style.width = `${next.duration_ms ? Math.min(100, next.position_ms / next.duration_ms * 100) : 0}%`;
   for (const button of all<HTMLButtonElement>('.skip-track')) button.disabled = !track;
   for (const button of all<HTMLButtonElement>('.wave-toggle')) button.setAttribute('aria-pressed', String(next.wave));
   for (const node of all<HTMLElement>('.position')) node.textContent = formatTime(next.position_ms);
@@ -162,11 +182,13 @@ function render(next: Snapshot): void {
     slider.max = String(Math.max(1, next.duration_ms));
     if (slider.dataset.editing !== 'true') slider.value = String(Math.min(next.position_ms, next.duration_ms));
     slider.setAttribute('aria-valuetext', `${formatTime(Number(slider.value))} из ${formatTime(next.duration_ms)}`);
+    sliderFill(slider);
   }
   for (const slider of all<HTMLInputElement>('.volume')) {
     if (slider.dataset.editing !== 'true') slider.value = String(next.volume);
+    sliderFill(slider);
   }
-  const preload = { idle: 'Очередь пуста', resolving: 'Ищем следующий поток…', buffering: 'Предзагрузка…', ready: '● Gapless Ready' }[next.preload];
+  const preload = { idle: 'Очередь пуста', resolving: 'Ищем следующий поток…', buffering: 'Предзагрузка…', ready: 'Следующий готов' }[next.preload];
   for (const label of all<HTMLElement>('.gapless-status')) {
     label.textContent = next.preload === 'idle' && next.queue.length ? 'Следующий трек в очереди' : preload;
     label.dataset.ready = String(next.preload === 'ready');
@@ -204,32 +226,42 @@ async function startWave(): Promise<void> {
   finally { waveBusy = false; buttons.forEach(button => { button.disabled = false; }); }
 }
 
-for (const button of all<HTMLButtonElement>('.nav-item')) button.addEventListener('click', () => {
-  const view = button.dataset.view;
+function show(view: string): void {
   for (const nav of all<HTMLButtonElement>('.nav-item')) {
-    const active = nav === button;
+    const active = nav.dataset.view === view;
     nav.classList.toggle('active', active);
     if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current');
   }
-  element('home-view').hidden = view !== 'home';
-  element('search-view').hidden = view === 'queue';
-  element('queue-view').hidden = view !== 'queue';
-  element('page-title').textContent = view === 'queue' ? 'Дальше — больше.' : view === 'search' ? 'Найди своё звучание.' : 'Твой ритм. Твоя волна.';
-  if (view === 'search') query.focus();
+  for (const name of Object.keys(titles)) element(`${name}-view`).hidden = name !== view;
+  element('page-title').textContent = titles[view] ?? titles.home;
+  window.scrollTo({ top: 0 });
+  if (view === 'search') query.focus({ preventScroll: true });
+}
+for (const button of all<HTMLButtonElement>('.nav-item')) button.addEventListener('click', () => show(button.dataset.view ?? 'home'));
+for (const card of all<HTMLButtonElement>('.action-card')) card.addEventListener('click', () => {
+  const radio = document.querySelector<HTMLInputElement>(`input[name="source"][value="${card.dataset.source}"]`);
+  if (radio) { radio.checked = true; query.placeholder = placeholders[radio.value]; }
+  show(card.dataset.goto ?? 'search');
+});
+for (const radio of all<HTMLInputElement>('input[name="source"]')) radio.addEventListener('change', () => {
+  query.placeholder = placeholders[radio.value];
+  if (query.value.trim()) element<HTMLFormElement>('search-form').requestSubmit();
 });
 element<HTMLFormElement>('search-form').addEventListener('submit', async event => {
   event.preventDefault();
-  if (searchButton.disabled || !query.value.trim()) return;
-  searchButton.disabled = true;
+  if (searching || !query.value.trim()) return;
+  searching = true;
+  query.blur(); // hide the on-screen keyboard on Android
+  element('search-progress').hidden = false;
   element('search-status').textContent = 'Ищем музыку…';
   try {
-    results = await command<TrackMetadata[]>('search_tracks', { query: query.value.trim(), source: element<HTMLSelectElement>('source').value });
+    results = await command<TrackMetadata[]>('search_tracks', { query: query.value.trim(), source: sourceValue() });
     visibleResults = 0;
     element('results').replaceChildren();
     appendResults();
     element('search-status').textContent = results.length ? `Найдено: ${results.length}. Треки добавлены в локальную библиотеку Волны.` : 'Ничего не найдено.';
   } catch (error) { element('search-status').textContent = 'Поиск не удался. Попробуй другой источник или прямую ссылку.'; notify(error); }
-  finally { searchButton.disabled = false; }
+  finally { searching = false; element('search-progress').hidden = true; }
 });
 element('more-results').addEventListener('click', appendResults);
 for (const button of all<HTMLButtonElement>('.wave-start, .wave-toggle')) button.addEventListener('click', () => { void startWave(); });
@@ -238,6 +270,7 @@ for (const button of all<HTMLButtonElement>('.skip-track')) button.addEventListe
 for (const slider of all<HTMLInputElement>('.seek, .volume')) {
   slider.addEventListener('input', () => {
     slider.dataset.editing = 'true';
+    sliderFill(slider);
     if (slider.classList.contains('seek')) slider.setAttribute('aria-valuetext', formatTime(Number(slider.value)));
   });
   slider.addEventListener('change', () => {
