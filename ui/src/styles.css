@@ -22,6 +22,8 @@
   --nav-rail: 80px;
   --nav-bar: 80px;
   --mini-player: 72px;
+  /* Height hidden under a still-shrunk visual viewport (Android keyboard); set by main.ts. */
+  --vv-gap: 0px;
   /* Fallback roles before theme.ts runs (seed #bede92, dark tonal spot). */
   --md-sys-color-primary: #a5d395; --md-sys-color-on-primary: #11380b;
   --md-sys-color-primary-container: #2a4f1f; --md-sys-color-on-primary-container: #c0f0af;
@@ -41,6 +43,7 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { background: var(--md-sys-color-surface); }
+html { min-height: 100%; min-height: 100dvh; }
 /* Animate artwork color changes only after the first palette, never at startup. */
 .theme-ready, .theme-ready body, .theme-ready .top-app-bar, .theme-ready .navigation, .theme-ready .mini-player,
 .theme-ready .hero-card, .theme-ready .action-card { transition: background-color var(--dur-long) var(--easing), color var(--dur-long) var(--easing); }
@@ -71,14 +74,20 @@ button:not(:disabled):focus-visible::after, button:not(:disabled):active::after 
 .brand { display: grid; place-items: center; width: 56px; height: 56px; margin-bottom: 28px; border-radius: var(--shape-l);
   background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); }
 .nav-item { display: grid; justify-items: center; gap: 4px; width: 80px; padding: 0 0 4px; font: var(--label-medium);
-  color: var(--md-sys-color-on-surface-variant); overflow: visible; }
+  color: var(--md-sys-color-on-surface-variant); overflow: visible; transition: color var(--dur-medium) var(--easing); }
 .indicator { position: relative; display: grid; place-items: center; width: 56px; height: 32px; border-radius: var(--shape-full);
   overflow: hidden; transition: background-color var(--dur-medium) var(--easing); }
+.indicator::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--md-sys-color-secondary-container);
+  transform: scaleX(.32); opacity: 0; transition: transform var(--dur-medium) var(--easing), opacity var(--dur-short) var(--easing); }
+.indicator > svg { position: relative; transition: transform var(--dur-medium) var(--easing); }
 .indicator::after { content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0; transition: opacity var(--dur-short); }
 @media (hover: hover) { .nav-item:hover .indicator::after { opacity: .08; } }
 .nav-item:active .indicator::after { opacity: .1; }
 .nav-item.active { color: var(--md-sys-color-on-surface); font-weight: 700; }
-.nav-item.active .indicator { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
+/* M3 active indicator grows from the center (transform only), instead of popping in. */
+.nav-item.active .indicator { color: var(--md-sys-color-on-secondary-container); }
+.nav-item.active .indicator::before { transform: none; opacity: 1; }
+.nav-item:active .indicator > svg { transform: scale(.92); }
 
 main { margin-left: var(--nav-rail); padding: 0 24px calc(var(--mini-player) + 48px); max-width: calc(1040px + var(--nav-rail)); }
 .top-app-bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -164,7 +173,13 @@ body.playing .play-toggle .icon-pause { display: block; }
 /* Lists */
 .list { display: grid; margin: 8px -8px 0; }
 .track-row { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 72px; padding: 8px 16px 8px 8px;
-  text-align: left; border-radius: var(--shape-l); color: var(--md-sys-color-on-surface); }
+  text-align: left; border-radius: var(--shape-l); color: var(--md-sys-color-on-surface);
+  transition: background-color var(--dur-medium) var(--easing), color var(--dur-medium) var(--easing), transform var(--dur-short) var(--easing); }
+.track-row:not(:disabled):active { transform: scale(.985); }
+.track-row::after { transition-duration: var(--dur-medium); }
+/* Entering rows: short fade/rise, delay capped at 10 rows (--i set in main.ts). */
+.track-row.enter { animation: row-in var(--dur-medium) var(--easing-decel) backwards; animation-delay: calc(var(--i, 0) * 30ms); }
+@keyframes row-in { from { opacity: 0; transform: translateY(6px); } }
 .track-row.current { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .track-row .track-copy { flex: 1; }
 .track-length { font: var(--label-medium); font-variant-numeric: tabular-nums; color: var(--md-sys-color-on-surface-variant); }
@@ -179,18 +194,23 @@ body.playing .play-toggle .icon-pause { display: block; }
 
 /* Covers */
 .cover { position: relative; flex-shrink: 0; display: grid; place-items: center; overflow: hidden;
-  border-radius: var(--shape-s); background: var(--md-sys-color-surface-container-highest); color: var(--md-sys-color-on-surface-variant); }
-.cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--dur-medium); }
+  border-radius: var(--shape-s); background: var(--md-sys-color-surface-container-highest) center / cover no-repeat;
+  color: var(--md-sys-color-on-surface-variant); }
+/* Previous artwork stays as the box background (main.ts) while the new one fades in on top. */
+.cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0;
+  transition: opacity var(--dur-long) var(--easing); }
 .cover img.loaded { opacity: 1; }
 .small { width: 56px; height: 56px; }
 .small .cover-fallback { width: 24px; height: 24px; }
 
 /* Mini player (docked above the nav bar on phones). */
-.mini-player { position: fixed; z-index: 20; left: calc(var(--nav-rail) + 12px); right: 12px; bottom: 12px; display: flex;
+.mini-player { position: fixed; z-index: 20; left: calc(var(--nav-rail) + 12px); right: 12px; bottom: calc(12px + var(--vv-gap)); display: flex;
   align-items: center; gap: 8px; height: var(--mini-player); padding: 8px 12px 8px 8px; overflow: hidden; border-radius: var(--shape-l);
   background: var(--md-sys-color-surface-container-high); box-shadow: var(--elev-3); transition: background-color var(--dur-long) var(--easing); }
 .mini-progress { position: absolute; inset: auto 0 0; height: 3px; background: var(--md-sys-color-outline-variant); }
-.mini-progress span { display: block; height: 100%; width: 0; background: var(--md-sys-color-primary); transition: width 250ms linear; }
+/* scaleX is composited; width would relayout on every position tick. */
+.mini-progress span { display: block; height: 100%; width: 100%; transform: scaleX(0); transform-origin: left;
+  background: var(--md-sys-color-primary); transition: transform 250ms linear; }
 .now-playing { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; height: 100%; padding-right: 8px;
   text-align: left; border-radius: var(--shape-m); }
 .now-playing .small { width: 48px; height: 48px; }
@@ -220,6 +240,10 @@ dialog { width: min(440px, 100vw); max-height: 100dvh; padding: 8px 24px 32px; o
   background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface); overscroll-behavior: contain; }
 dialog::backdrop { background: rgb(0 0 0 / .32); }
 dialog[open] { animation: sheet-in var(--dur-long) var(--easing-decel) both; }
+dialog[open]::backdrop { animation: fade-in var(--dur-medium) var(--easing) both; }
+/* Exit: accelerate out, shorter than the entrance (M3 motion); main.ts closes on animation end. */
+dialog[open].closing { animation: sheet-out var(--dur-medium) cubic-bezier(.3, 0, .8, .15) both; pointer-events: none; }
+dialog[open].closing::backdrop { animation: fade-out var(--dur-medium) var(--easing) both; }
 .drag-handle { width: 32px; height: 4px; margin: 8px auto 4px; border-radius: var(--shape-full);
   background: var(--md-sys-color-on-surface-variant); opacity: .4; }
 .sheet-header { display: flex; align-items: center; justify-content: space-between; margin: 0 -12px 8px; }
@@ -237,12 +261,17 @@ dialog[open] { animation: sheet-in var(--dur-long) var(--easing-decel) both; }
 .sheet-next { padding: 16px; border-radius: var(--shape-l); background: var(--md-sys-color-surface-container-high); }
 .sheet-next p { margin-top: 4px; font: var(--body-medium); overflow-wrap: anywhere; }
 @keyframes sheet-in { from { transform: translateY(48px); opacity: 0; } }
+@keyframes sheet-out { to { transform: translateY(48px); opacity: 0; } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
 
-.snackbar { position: fixed; z-index: 50; left: 50%; bottom: calc(var(--mini-player) + 28px); transform: translateX(-50%);
+.snackbar { position: fixed; z-index: 50; left: 50%; bottom: calc(var(--mini-player) + 28px + var(--vv-gap)); transform: translateX(-50%);
   width: max-content; max-width: min(560px, calc(100vw - 24px)); min-height: 48px; padding: 14px 16px; border-radius: var(--shape-xs);
   background: var(--md-sys-color-inverse-surface); color: var(--md-sys-color-inverse-on-surface); box-shadow: var(--elev-3);
   font: var(--body-medium); overflow-wrap: anywhere; animation: snack-in var(--dur-medium) var(--easing-decel); }
 @keyframes snack-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+.snackbar.leaving { animation: snack-out var(--dur-short) var(--easing) both; }
+@keyframes snack-out { to { opacity: 0; transform: translate(-50%, 8px); } }
 
 #home-view, #search-view, #queue-view { animation: fade-through var(--dur-medium) var(--easing-decel); }
 @keyframes fade-through { from { opacity: 0; transform: translateY(8px); } }
@@ -251,7 +280,8 @@ dialog[open] { animation: sheet-in var(--dur-long) var(--easing-decel) both; }
 
 /* Compact window class (phones): bottom navigation bar and docked mini player. */
 @media (max-width: 599px) {
-  .navigation { inset: auto 0 0; width: auto; height: calc(var(--nav-bar) + env(safe-area-inset-bottom)); flex-direction: row;
+  /* --vv-gap lifts the bars back into view if the WebView keeps a shrunk viewport after the keyboard. */
+  .navigation { inset: auto 0 var(--vv-gap); width: auto; height: calc(var(--nav-bar) + env(safe-area-inset-bottom)); flex-direction: row;
     justify-content: space-around; gap: 0; padding: 12px 0 calc(16px + env(safe-area-inset-bottom));
     background: var(--md-sys-color-surface-container); }
   .brand { display: none; }
@@ -268,18 +298,21 @@ dialog[open] { animation: sheet-in var(--dur-long) var(--easing-decel) both; }
     100% { border-radius: 58% 42% 40% 60% / 60% 55% 45% 40%; transform: rotate(40deg); }
   }
   .hero-copy { max-width: 75%; }
-  .mini-player { left: 8px; right: 8px; bottom: calc(var(--nav-bar) + 8px + env(safe-area-inset-bottom)); height: 64px;
+  .mini-player { left: 8px; right: 8px; bottom: calc(var(--nav-bar) + 8px + env(safe-area-inset-bottom) + var(--vv-gap)); height: 64px;
     padding: 8px 4px 8px 8px; border-radius: var(--shape-m); }
   .mini-player .wave-toggle { display: none; }
   .now-playing .small { width: 44px; height: 44px; }
   .mini-player .fab-small { background: none; color: var(--md-sys-color-on-surface); }
-  .snackbar { bottom: calc(var(--nav-bar) + 72px + env(safe-area-inset-bottom)); }
+  .snackbar { bottom: calc(var(--nav-bar) + 72px + env(safe-area-inset-bottom) + var(--vv-gap)); }
   dialog { inset: auto 0 0; margin: 0; width: 100vw; max-width: none; max-height: calc(100dvh - env(safe-area-inset-top));
     border-radius: var(--shape-xl) var(--shape-xl) 0 0; padding: 0 24px max(24px, env(safe-area-inset-bottom)); }
+  /* Bottom sheet slides fully off the bottom edge. */
+  dialog[open].closing { animation-name: sheet-down; }
   .hero-cover { width: min(100%, 42dvh); margin-inline: auto; }
   .sheet-track { margin-top: 20px; }
   .fab-large { width: 80px; height: 80px; }
 }
+@keyframes sheet-down { to { transform: translateY(100%); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

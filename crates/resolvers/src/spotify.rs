@@ -628,6 +628,20 @@ mod embed_tests {
             assert!(matches!(parse_track(&incomplete), Err(ResolverError::Parse { .. })));
         }
     }
+
+    #[test]
+    fn text_queries_are_distinguished_from_track_references() {
+        for text in ["daft punk one more time", " artist - title ", "spotify"] { assert!(is_text_query(text), "{text}"); }
+        for reference in ["4cOdK2wGLETKBW3PvgPWqT", "spotify:track:4cOdK2wGLETKBW3PvgPWqT",
+            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=x", "spotify:album:4cOdK2wGLETKBW3PvgPWqT",
+            "https://example.com/track/x"] { assert!(!is_text_query(reference), "{reference}"); }
+    }
+}
+
+/// True for free-text search input; false for a Spotify track URL, URI or ID
+/// (or malformed Spotify links), whose metadata no other provider can supply.
+pub fn is_text_query(input: &str) -> bool {
+    matches!(spotify_id(input.trim(), "track"), Ok(None))
 }
 
 fn spotify_id(input: &str, kind: &str) -> Result<Option<String>, ResolverError> {

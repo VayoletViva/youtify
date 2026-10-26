@@ -145,6 +145,20 @@ fn panic_category(payload: &(dyn std::any::Any + Send)) -> &'static str {
     else { "internal panic; console panic location needed (omit URLs and tokens)" }
 }
 
+/// Spotify failures that say nothing about the query itself: regional block,
+/// anonymous quota, or no reachable session. Text search may use another provider.
+fn spotify_fallback(error: &core_types::ResolverError) -> bool {
+    use core_types::ResolverError::*;
+    matches!(error, Http { status: 451 | 429 | 403, .. } | RateLimited { .. } | Unavailable { .. } | Transport { .. })
+}
+
+fn spotify_error(error: core_types::ResolverError) -> String {
+    match error {
+        core_types::ResolverError::Http { service, status: 451 } => format!("{service}: HTTP 451 (unavailable in this country)"),
+        error => error.to_string(),
+    }
+}
+
 /// Tauri requires Send + Sync state. AudioEngine's device handle is deliberately
 /// NOT moved across threads: the actor owns it and SQLite on one dedicated thread.
 /// The shared facade owns the actor's bounded mailbox, providers and UI snapshot.
@@ -216,9 +230,17 @@ impl AppState {
         if query.is_empty() || query.len() > 2048 { return Err("Query must contain 1..2048 bytes".into()); }
         self.search_with_metadata(Duration::from_secs(35), async {
             match source.to_ascii_lowercase().as_str() {
-                "spotify" => self.providers.spotify.track(query).await.map(|t| vec![t]),
+                "spotify" => return match self.providers.spotify.track(query).await {
+                    Ok(track) => Ok(vec![track]),
+                    // Spotify only supplies metadata; a text query can still be
+                    // answered by SoundCloud. A blocked Spotify link cannot.
+                    Err(error) if spotify_fallback(&error) && resolvers::spotify::is_text_query(query) =>
+                        self.providers.soundcloud.track(query).await.map(|t| vec![t])
+                            .map_err(|fallback| format!("{}; {fallback}", spotify_error(error))),
+                    Err(error) => Err(spotify_error(error)),
+                },
                 "soundcloud" => self.providers.soundcloud.track(query).await.map(|t| vec![t]),
-                "spotify-playlist" => self.providers.spotify.playlist(query).await,
+                "spotify-playlist" => return self.providers.spotify.playlist(query).await.map_err(spotify_error),
                 "soundcloud-playlist" => self.providers.soundcloud.playlist(query).await,
                 _ => return Err("Source must be spotify, soundcloud, spotify-playlist or soundcloud-playlist; YouTube exposes streams only".into()),
             }.map_err(|e| e.to_string())
@@ -640,6 +662,17 @@ mod tests {
         TrackMetadata { id: "spotify:track:test".into(), title: "Test".into(),
             artists: vec!["Artist".into()], album: None, duration_ms: 1000,
             cover_url: None, isrc: None }
+    }
+
+    #[test]
+    fn spotify_region_block_is_explicit_and_falls_back() {
+        use core_types::ResolverError::*;
+        assert_eq!(spotify_error(Http { service: "Spotify", status: 451 }), "Spotify: HTTP 451 (unavailable in this country)");
+        assert_eq!(spotify_error(Http { service: "Spotify", status: 404 }), "Spotify: HTTP 404");
+        assert!(spotify_fallback(&Http { service: "Spotify", status: 451 }));
+        assert!(spotify_fallback(&RateLimited { service: "Spotify", retry_after_secs: 60 }));
+        assert!(!spotify_fallback(&NotFound { service: "Spotify", query: "x".into() }));
+        assert!(!spotify_fallback(&InvalidInput("x".into())));
     }
 
     #[tokio::test]

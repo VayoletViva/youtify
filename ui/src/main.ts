@@ -72,6 +72,8 @@ const formatTime = (ms: number): string => {
 };
 /** Short Russian explanations for known backend errors; the raw text stays visible in app-status. */
 const knownErrors: [RegExp, string][] = [
+  [/HTTP 451.*; SoundCloud/, 'Spotify недоступен в твоём регионе, а в SoundCloud этот трек не нашёлся. Попробуй другое название.'],
+  [/HTTP 451/, 'Spotify недоступен в твоём регионе. Ищи трек по названию (найдём через SoundCloud) или выбери источник SoundCloud.'],
   [/HLS: (encrypted|master|live|byte-range)/, 'Этот поток SoundCloud защищён или устроен нестандартно. Ищем другой источник.'],
   [/native (HLS )?decode failed|Opus needs an external/, 'Встроенный декодер не справился с форматом этого трека. Попробуй другой трек или источник.'],
   [/HTTP 403/, 'Сервис отказал в доступе к потоку (403). Возможно, ссылка устарела — повтори воспроизведение.'],
@@ -90,26 +92,41 @@ function errorText(message: unknown): string {
 }
 function notify(message: unknown): void {
   const text = errorText(message);
-  status.textContent = text;
+  const raw = String(message);
+  // Keep the backend detail (codec, source) visible for bug reports.
+  status.textContent = text === raw ? text : `${text} (${raw})`;
   toast.textContent = text;
+  toast.classList.remove('leaving');
   toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.hidden = true; }, 6500);
+  toastTimer = setTimeout(() => {
+    toast.classList.add('leaving');
+    afterExit(toast, () => { if (toast.classList.contains('leaving')) { toast.hidden = true; toast.classList.remove('leaving'); } });
+  }, 6500);
 }
 async function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('В браузере доступен только интерфейс. Для музыки запусти приложение Tauri.');
   return invoke<T>(name, args);
 }
 function setCover(image: HTMLImageElement, cover: string | null): void {
+  // Crossfade: keep the old artwork under the new one until it has loaded.
+  const box = image.parentElement;
+  const old = image.classList.contains('loaded') && image.currentSrc;
+  if (box) box.style.backgroundImage = old ? `url("${old.replace(/["\\]/g, '\\$&')}")` : '';
   image.hidden = true;
   image.classList.remove('loaded');
   image.referrerPolicy = 'no-referrer';
-  image.onload = () => { image.classList.add('loaded'); };
-  image.onerror = () => { image.hidden = true; image.classList.remove('loaded'); };
+  const clearOld = (): void => { if (box) box.style.backgroundImage = ''; };
+  image.onload = () => { image.classList.add('loaded'); setTimeout(clearOld, 550); };
+  image.onerror = () => { image.hidden = true; image.classList.remove('loaded'); clearOld(); };
   const url = safeCoverUrl(cover);
   // Keep a layout box so native lazy loading can observe the image.
   if (url) { image.hidden = false; image.src = url; }
-  else image.removeAttribute('src');
+  else { image.removeAttribute('src'); clearOld(); }
+}
+/** Subtle staggered entrance; only the first rows get a delay so long lists don't keep animating. */
+function enter(rows: HTMLElement[]): void {
+  rows.forEach((row, index) => { row.classList.add('enter'); row.style.setProperty('--i', String(Math.min(index, 10))); });
 }
 async function play(track: TrackMetadata): Promise<void> {
   const request = ++playRequest;
@@ -145,9 +162,9 @@ function trackRow(track: TrackMetadata): HTMLButtonElement {
 }
 function appendResults(): void {
   const end = Math.min(visibleResults + 40, results.length);
-  const fragment = document.createDocumentFragment();
-  for (const track of results.slice(visibleResults, end)) fragment.append(trackRow(track));
-  element('results').append(fragment);
+  const rows = results.slice(visibleResults, end).map(trackRow);
+  enter(rows);
+  element('results').append(...rows);
   visibleResults = end;
   element('more-results').hidden = visibleResults >= results.length;
 }
@@ -172,7 +189,7 @@ function render(next: Snapshot): void {
     button.disabled = !track;
     button.setAttribute('aria-label', next.paused || !track ? 'Воспроизвести' : 'Пауза');
   }
-  element('mini-progress-bar').style.width = `${next.duration_ms ? Math.min(100, next.position_ms / next.duration_ms * 100) : 0}%`;
+  element('mini-progress-bar').style.transform = `scaleX(${next.duration_ms ? Math.min(1, next.position_ms / next.duration_ms) : 0})`;
   for (const button of all<HTMLButtonElement>('.skip-track')) button.disabled = !track;
   for (const button of all<HTMLButtonElement>('.wave-toggle')) button.setAttribute('aria-pressed', String(next.wave));
   for (const node of all<HTMLElement>('.position')) node.textContent = formatTime(next.position_ms);
@@ -199,7 +216,11 @@ function render(next: Snapshot): void {
   const key = JSON.stringify(queued.map(t => t.id));
   if (key !== queueKey) {
     queueKey = key;
-    element('queue-list').replaceChildren(...queued.map(trackRow));
+    // Animate only tracks that were not already listed, so queue refreshes don't flash.
+    const known = new Set(all<HTMLElement>('#queue-list .track-row').map(row => row.dataset.trackId));
+    const rows = queued.map(trackRow);
+    enter(rows.filter(row => !known.has(row.dataset.trackId)));
+    element('queue-list').replaceChildren(...rows);
     element('queue-empty').hidden = queued.length > 0;
   }
   if (activeId !== track?.id) {
@@ -226,7 +247,40 @@ async function startWave(): Promise<void> {
   finally { waveBusy = false; buttons.forEach(button => { button.disabled = false; }); }
 }
 
+const finePointer = matchMedia('(pointer: fine)');
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const viewport = window.visualViewport;
+/** Android WebView can stay panned/shrunk after the soft keyboard closes; fixed bars then sit below the
+ *  visible edge. Pin them to the visual viewport (--vv-gap) and undo leftover pan once nothing is typing. */
+function settleViewport(): void {
+  if (!viewport) return;
+  const typing = document.activeElement === query;
+  // Desktop: innerHeight counts a horizontal scrollbar, so never offset there.
+  const zoomed = viewport.scale > 1.01 || finePointer.matches;
+  const gap = typing || zoomed ? 0 : Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+  document.documentElement.style.setProperty('--vv-gap', `${gap}px`);
+  if (typing || zoomed) return;
+  // Re-align the visual viewport with the layout viewport and clamp overscroll left by the keyboard.
+  const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  const top = Math.min(Math.max(0, viewport.pageTop - viewport.offsetTop), max);
+  if (viewport.offsetTop > 0.5 || window.scrollY > max) window.scrollTo(0, top);
+}
+viewport?.addEventListener('resize', settleViewport);
+viewport?.addEventListener('scroll', settleViewport);
+window.addEventListener('resize', settleViewport);
+// The keyboard animates out after blur; settle again once it is gone.
+query.addEventListener('blur', () => { requestAnimationFrame(settleViewport); setTimeout(settleViewport, 350); });
+/** Run `done` once the element's exit animation ends; immediate with reduced motion or no animation. */
+function afterExit(node: HTMLElement, done: () => void): void {
+  const animations = reducedMotion.matches ? [] : node.getAnimations();
+  if (!animations.length) { done(); return; }
+  void Promise.all(animations.map(animation => animation.finished)).then(done, done);
+}
+
 function show(view: string): void {
+  // Close the keyboard before its view disappears; a hidden focused input leaves the WebView panned.
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement && focused.closest('section[id$="-view"]') && !element(`${view}-view`).contains(focused)) focused.blur();
   for (const nav of all<HTMLButtonElement>('.nav-item')) {
     const active = nav.dataset.view === view;
     nav.classList.toggle('active', active);
@@ -234,8 +288,10 @@ function show(view: string): void {
   }
   for (const name of Object.keys(titles)) element(`${name}-view`).hidden = name !== view;
   element('page-title').textContent = titles[view] ?? titles.home;
-  window.scrollTo({ top: 0 });
-  if (view === 'search') query.focus({ preventScroll: true });
+  if (window.scrollY) window.scrollTo(0, 0); // instant: the new view fades in from the top
+  settleViewport();
+  // Auto-focus only with a mouse; on touch it pops the soft keyboard on every visit.
+  if (view === 'search' && finePointer.matches) query.focus({ preventScroll: true });
 }
 for (const button of all<HTMLButtonElement>('.nav-item')) button.addEventListener('click', () => show(button.dataset.view ?? 'home'));
 for (const card of all<HTMLButtonElement>('.action-card')) card.addEventListener('click', () => {
@@ -280,14 +336,23 @@ for (const slider of all<HTMLInputElement>('.seek, .volume')) {
   slider.addEventListener('blur', () => { slider.dataset.editing = 'false'; });
   slider.addEventListener('pointercancel', () => { slider.dataset.editing = 'false'; });
 }
-element('open-player').addEventListener('click', () => { if (!sheet.open) sheet.showModal(); });
-element('close-player').addEventListener('click', () => { sheet.close(); });
-// Native dialog handles focus trapping, Escape and restoration of focus.
+/** Play the sheet's exit animation, then close; native close still restores focus. */
+function closeSheet(): void {
+  if (!sheet.open || sheet.classList.contains('closing')) return;
+  sheet.classList.add('closing');
+  afterExit(sheet, () => { if (sheet.classList.contains('closing')) sheet.close(); });
+}
+element('open-player').addEventListener('click', () => { if (!sheet.open) { sheet.classList.remove('closing'); sheet.showModal(); } });
+element('close-player').addEventListener('click', closeSheet);
+// Escape: animate instead of the instant native close (an uncancelable cancel still closes natively).
+sheet.addEventListener('cancel', event => { event.preventDefault(); closeSheet(); });
+sheet.addEventListener('close', () => { sheet.classList.remove('closing'); settleViewport(); });
+// Native dialog handles focus trapping and restoration of focus.
 let touchStart: number | undefined;
 const sheetHeader = sheet.querySelector<HTMLElement>('.sheet-header')!;
 sheetHeader.addEventListener('touchstart', event => { touchStart = event.touches[0]?.clientY; }, { passive: true });
 sheetHeader.addEventListener('touchend', event => {
-  if (touchStart !== undefined && (event.changedTouches[0]?.clientY ?? touchStart) - touchStart > 80) sheet.close();
+  if (touchStart !== undefined && (event.changedTouches[0]?.clientY ?? touchStart) - touchStart > 80) closeSheet();
   touchStart = undefined;
 }, { passive: true });
 document.addEventListener('visibilitychange', () => { document.body.classList.toggle('background', document.hidden); });

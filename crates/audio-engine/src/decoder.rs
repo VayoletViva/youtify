@@ -1,8 +1,8 @@
 //! Replaceable decoder backend: native Rodio/Symphonia by default, explicit
 //! FFmpeg opt-in for WebM/Opus, HLS and servers without HTTP Range support.
-use crate::{hls::HlsReader, streamer::HttpReader, EngineError, Result};
-use core_types::{AudioCodec, StreamInfo};
-use rodio::{Decoder, Source};
+use crate::{hls::HlsReader, mp4, streamer::{HttpReader, SplicedReader}, EngineError, Result};
+use core_types::{AudioCodec, StreamInfo, StreamSource};
+use rodio::{decoder::DecoderError, Decoder, Source};
 use std::{io::{BufReader, Read}, path::PathBuf, process::{Child, ChildStdout, Command, Stdio},
     sync::{Arc, atomic::AtomicBool}, time::Duration};
 use tokio::runtime::Handle;
@@ -28,25 +28,68 @@ impl DecoderBackend for NativeDecoder {
         if stream.codec == AudioCodec::Opus {
             return Err(EngineError::Message("Opus needs an external DecoderBackend; CLI: --ffmpeg".into()));
         }
+        let context = describe(stream);
         if stream.hls {
             // Forward-only stream: start at the segment containing `position`,
             // then discard the remaining offset as decoded frames.
-            let (reader, skip) = HlsReader::open(self.client.clone(), &stream.stream_url, runtime.clone(), cancelled, position)?;
+            let (reader, skip) = HlsReader::open(self.client.clone(), &stream.stream_url, runtime.clone(), cancelled, position)
+                .map_err(|e| EngineError::Message(format!("native HLS decode failed ({context}): {e}")))?;
             let hint = if stream.codec == AudioCodec::Mp3 { "mp3" } else { "mp4" };
             let decoder = Decoder::builder().with_data(BufReader::new(reader))
                 .with_seekable(false).with_hint(hint).with_gapless(true).build()
-                .map_err(|e| EngineError::Message(format!("native HLS decode failed: {e}")))?;
+                .map_err(|e| EngineError::Message(format!("native HLS decode failed ({context}): {}", decoder_error(&e))))?;
             return Ok(Box::new(decoder.skip_duration(skip)));
         }
         let reader = HttpReader::open(self.client.clone(), stream.stream_url.clone(), runtime.clone(), cancelled)?;
+        let fail = |container: &str, e: &dyn std::fmt::Display|
+            EngineError::Message(format!("native decode failed ({context}, {container}): {e}"));
+        if let Some(layout) = mp4::layout(reader.head()).filter(|l| l.fragmented) {
+            // Fragmented MP4 (YouTube DASH m4a): Symphonia's seekable mode would
+            // scan every top-level atom, i.e. download the whole file before
+            // the first sample. Feed init + the fragment holding `position`
+            // forward-only instead, then skip the remainder as decoded PCM.
+            let (resume, start) = match &layout.sidx {
+                Some(sidx) => sidx.fragment_at(position),
+                // No index: decode from the first fragment (slow but correct).
+                None => (layout.init_end, Duration::ZERO),
+            };
+            if resume < layout.init_end || resume > reader.len() {
+                return Err(fail("fragmented MP4", &"fragment index points outside the file"));
+            }
+            let reader = SplicedReader::new(reader, layout.init_end, resume);
+            let decoder = Decoder::builder().with_data(BufReader::new(reader))
+                .with_seekable(false).with_hint("mp4").with_gapless(true).build()
+                .map_err(|e| fail("fragmented MP4", &decoder_error(&e)))?;
+            return Ok(Box::new(decoder.skip_duration(position.saturating_sub(start))));
+        }
+        // Progressive MP4 (moov + one mdat) and MP3: the seekable scan only
+        // touches a few headers, and random access gives exact seeks.
+        let container = if reader.head().get(4..8) == Some(b"ftyp") { "MP4" }
+            else if stream.codec == AudioCodec::Mp3 { "MP3" } else { "unknown container" };
         let length = reader.len();
         let mut decoder = Decoder::builder().with_data(BufReader::new(reader))
             .with_byte_len(length).with_seekable(true).with_gapless(true).build()
-            .map_err(|e| EngineError::Message(format!("native decode failed: {e}")))?;
+            .map_err(|e| fail(container, &decoder_error(&e)))?;
         if !position.is_zero() {
-            decoder.try_seek(position).map_err(|e| EngineError::Message(e.to_string()))?;
+            decoder.try_seek(position).map_err(|e| fail(container, &format!("seek failed: {e}")))?;
         }
         Ok(Box::new(decoder))
+    }
+}
+
+/// Codec and service for error messages; never the (signed) URL.
+fn describe(stream: &StreamInfo) -> String {
+    let codec = match stream.codec { AudioCodec::Aac => "AAC", AudioCodec::Mp3 => "MP3", AudioCodec::Opus => "Opus" };
+    let source = match stream.source { StreamSource::YouTube => "YouTube", StreamSource::SoundCloud => "SoundCloud" };
+    format!("{codec}, {source}")
+}
+
+/// Rodio's `Display` collapses unsupported codecs to "Unrecognized format";
+/// make that case explicit.
+fn decoder_error(error: &DecoderError) -> String {
+    match error {
+        DecoderError::UnrecognizedFormat => "unrecognized or unsupported format".into(),
+        other => other.to_string(),
     }
 }
 
