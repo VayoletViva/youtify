@@ -14,6 +14,7 @@
       <button class="nav-item active" data-view="home" aria-current="page"><span class="indicator"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8h5Z"/></svg></span>Главная</button>
       <button class="nav-item" data-view="search"><span class="indicator"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg></span>Поиск</button>
       <button class="nav-item" data-view="queue"><span class="indicator"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6H3v2h12V6Zm0 4H3v2h12v-2ZM3 16h8v-2H3v2ZM17 6v8.18A3 3 0 1 0 19 17V8h3V6h-5Z"/></svg></span>Очередь</button>
+      <button class="nav-item" data-view="downloads"><span class="indicator"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14v-2H5v2Zm14-9h-4V3H9v8H5l7 7 7-7Z"/></svg></span>Загрузки</button>
     </nav>
 
     <main id="content" tabindex="-1">
@@ -23,7 +24,7 @@
         <div class="hero-card">
           <div class="hero-copy">
             <h2 id="wave-title">Моя волна</h2>
-            <p>Бесконечный поток под твой вкус. Рекомендации обновляются по мере прослушивания.</p>
+            <p id="wave-supporting" aria-live="polite">Бесконечный поток под твой вкус. Подмешиваем новые треки из Deezer, YouTube и SoundCloud и учимся по мере прослушивания.</p>
             <button class="filled wave-start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg>Поймать волну</button>
           </div>
           <div class="hero-shape" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg></div>
@@ -31,7 +32,7 @@
         <h2 class="section-title">С чего начать</h2>
         <div class="card-grid">
           <button class="action-card" data-goto="search" data-source="spotify"><span class="card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg></span><strong>Найти трек</strong><span>По названию, исполнителю или ссылке</span></button>
-          <button class="action-card" data-goto="search" data-source="spotify-playlist"><span class="card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 10H3v2h11v-2Zm0-4H3v2h11V6Zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4ZM3 16h7v-2H3v2Z"/></svg></span><strong>Импорт плейлиста</strong><span>Spotify или SoundCloud</span></button>
+          <button class="action-card" data-goto="search" data-source="spotify-playlist"><span class="card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 10H3v2h11v-2Zm0-4H3v2h11V6Zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4ZM3 16h7v-2H3v2Z"/></svg></span><strong>Импорт плейлиста</strong><span>Deezer, SoundCloud или Spotify</span></button>
         </div>
       </section>
 
@@ -40,21 +41,29 @@
           <label class="search-bar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg><span class="sr-only">Название, исполнитель или ссылка</span><input id="query" type="search" required maxlength="2048" placeholder="Трек, исполнитель или ссылка" autocomplete="off" enterkeyhint="search" /></label>
           <div class="chip-set" role="radiogroup" aria-label="Источник">
             <label class="filter-chip"><input type="radio" name="source" value="spotify" checked /><span>Spotify</span></label>
+            <label class="filter-chip"><input type="radio" name="source" value="deezer" /><span>Deezer</span></label>
             <label class="filter-chip"><input type="radio" name="source" value="soundcloud" /><span>SoundCloud</span></label>
             <label class="filter-chip"><input type="radio" name="source" value="spotify-playlist" /><span>Плейлист Spotify</span></label>
+            <label class="filter-chip"><input type="radio" name="source" value="deezer-playlist" /><span>Плейлист Deezer</span></label>
             <label class="filter-chip"><input type="radio" name="source" value="soundcloud-playlist" /><span>Плейлист SoundCloud</span></label>
           </div>
         </form>
-        <p id="search-status" class="supporting" role="status">Слушаем через YouTube или SoundCloud. По ссылке на плейлист импортируем весь список.</p>
+        <p id="search-status" class="supporting" role="status">Ищем в Spotify, Deezer и SoundCloud, слушаем через YouTube или SoundCloud. По ссылке на плейлист импортируем весь список.</p>
         <div id="search-progress" class="linear-progress" hidden><span></span></div>
-        <div id="results" class="list" aria-label="Результаты поиска"></div>
+        <div id="results" class="list" role="list" aria-label="Результаты поиска"></div>
         <button id="more-results" class="tonal" hidden>Показать ещё</button>
       </section>
 
       <section id="queue-view" aria-label="Очередь воспроизведения" hidden>
         <p id="queue-mode" class="supporting">Обычная очередь</p>
         <p id="queue-empty" class="empty-state">Пока пусто. Включи волну или выбери трек из плейлиста.</p>
-        <div id="queue-list" class="list"></div>
+        <div id="queue-list" class="list" role="list" aria-label="Очередь"></div>
+      </section>
+
+      <section id="downloads-view" aria-label="Скачанные треки" hidden>
+        <p id="downloads-status" class="supporting">Загружаем список…</p>
+        <p id="downloads-empty" class="empty-state" hidden>Скачанных треков пока нет. Нажми на стрелку рядом с треком, чтобы слушать его без сети.</p>
+        <div id="downloads-list" class="list" role="list" aria-label="Скачанные треки"></div>
       </section>
       <p id="app-status" class="app-status" role="status">Подключение к плееру…</p>
     </main>
@@ -72,7 +81,7 @@
 
     <dialog id="player-sheet" aria-labelledby="sheet-title">
       <div class="drag-handle" aria-hidden="true"></div>
-      <header class="sheet-header"><button id="close-player" class="icon-button" aria-label="Свернуть плеер"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6-1.41-1.41Z"/></svg></button><span class="sheet-label">Сейчас играет</span><span class="icon-spacer"></span></header>
+      <header class="sheet-header"><button id="close-player" class="icon-button" aria-label="Свернуть плеер"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6-1.41-1.41Z"/></svg></button><span class="sheet-label">Сейчас играет</span><button id="sheet-download" class="icon-button track-action" type="button" aria-label="Скачать" title="Скачать" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14v-2H5v2Zm14-9h-4V3H9v8H5l7 7 7-7Z"/></svg></button></header>
       <div class="sheet-content">
         <div class="cover hero-cover"><img id="sheet-cover" alt="Обложка текущего трека" hidden /><svg class="cover-fallback" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg></div>
         <div class="sheet-track"><h2 id="sheet-title">Ничего не играет</h2><p id="sheet-artist">Выбери трек или включи волну</p></div>

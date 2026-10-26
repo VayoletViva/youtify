@@ -1,9 +1,10 @@
 //! Replaceable decoder backend: native Rodio/Symphonia by default, explicit
 //! FFmpeg opt-in for WebM/Opus, HLS and servers without HTTP Range support.
+//! `StreamSource::Local` streams are downloaded files at absolute paths.
 use crate::{hls::HlsReader, mp4, streamer::{HttpReader, SplicedReader}, EngineError, Result};
 use core_types::{AudioCodec, StreamInfo, StreamSource};
 use rodio::{decoder::DecoderError, Decoder, Source};
-use std::{io::{BufReader, Read}, path::PathBuf, process::{Child, ChildStdout, Command, Stdio},
+use std::{fs::File, io::{BufReader, Read}, path::{Path, PathBuf}, process::{Child, ChildStdout, Command, Stdio},
     sync::{Arc, atomic::AtomicBool}, time::Duration};
 use tokio::runtime::Handle;
 
@@ -29,6 +30,7 @@ impl DecoderBackend for NativeDecoder {
             return Err(EngineError::Message("Opus needs an external DecoderBackend; CLI: --ffmpeg".into()));
         }
         let context = describe(stream);
+        if stream.source == StreamSource::Local { return open_local(stream, position, &context); }
         if stream.hls {
             // Forward-only stream: start at the segment containing `position`,
             // then discard the remaining offset as decoded frames.
@@ -77,10 +79,44 @@ impl DecoderBackend for NativeDecoder {
     }
 }
 
+/// Downloaded files only; a relative path would resolve against whatever the
+/// process working directory happens to be.
+fn local_path(stream: &StreamInfo) -> Result<&Path> {
+    let path = Path::new(&stream.stream_url);
+    if stream.stream_url.is_empty() || !path.is_absolute() {
+        return Err(EngineError::Message("local stream must be an absolute file path".into()));
+    }
+    Ok(path)
+}
+
+/// Whole-file random access is cheap on disk, so even fragmented MP4 (saved
+/// from HLS/DASH) opens in seekable mode: Symphonia's isomp4 scans the moof
+/// atoms forward during the seek, which gives exact positions.
+fn open_local(stream: &StreamInfo, position: Duration, context: &str) -> Result<AudioSource> {
+    let path = local_path(stream)?;
+    let fail = |e: &dyn std::fmt::Display| EngineError::Message(format!("native decode failed ({context}): {e}"));
+    let hint = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("mp3") => "mp3",
+        Some("m4a" | "mp4") => "mp4",
+        _ => if stream.codec == AudioCodec::Mp3 { "mp3" } else { "mp4" },
+    };
+    let build = || -> Result<Decoder<BufReader<File>>> {
+        // Do not echo the path: it can contain the user's account name.
+        let file = File::open(path).map_err(|e| fail(&format!("cannot open file: {}", e.kind())))?;
+        let length = file.metadata().map_err(|e| fail(&format!("cannot read file size: {}", e.kind())))?.len();
+        Decoder::builder().with_data(BufReader::new(file)).with_byte_len(length).with_seekable(true)
+            .with_hint(hint).with_gapless(true).build().map_err(|e| fail(&decoder_error(&e)))
+    };
+    let mut decoder = build()?;
+    if position.is_zero() || decoder.try_seek(position).is_ok() { return Ok(Box::new(decoder)); }
+    // A failed seek may leave the demuxer mid-file: reopen and discard PCM.
+    Ok(Box::new(build()?.skip_duration(position)))
+}
+
 /// Codec and service for error messages; never the (signed) URL.
 fn describe(stream: &StreamInfo) -> String {
     let codec = match stream.codec { AudioCodec::Aac => "AAC", AudioCodec::Mp3 => "MP3", AudioCodec::Opus => "Opus" };
-    let source = match stream.source { StreamSource::YouTube => "YouTube", StreamSource::SoundCloud => "SoundCloud" };
+    let source = match stream.source { StreamSource::YouTube => "YouTube", StreamSource::SoundCloud => "SoundCloud", StreamSource::Local => "local file" };
     format!("{codec}, {source}")
 }
 
@@ -106,19 +142,29 @@ impl FfmpegDecoder {
 impl DecoderBackend for FfmpegDecoder {
     fn open(&self, stream: &StreamInfo, position: Duration, _: &Handle,
         _: Arc<AtomicBool>) -> Result<AudioSource> {
-        if !stream.stream_url.starts_with("https://") && !stream.stream_url.starts_with("http://") {
+        let local = stream.source == StreamSource::Local;
+        let input = if local {
+            // `file:` keeps a Windows drive letter from being parsed as a protocol.
+            format!("file:{}", local_path(stream)?.display())
+        } else if stream.stream_url.starts_with("https://") || stream.stream_url.starts_with("http://") {
+            stream.stream_url.clone()
+        } else {
             return Err(EngineError::Message("FFmpeg input must be an HTTP(S) URL".into()));
-        }
+        };
+        let position = position.as_secs_f64().to_string();
+        // HTTP options stay off for files: unused input options fail the open.
+        let input_args: Vec<&str> = if local { vec!["-protocol_whitelist", "file"] } else {
+            vec!["-rw_timeout", "10000000", "-user_agent", core_types::MEDIA_USER_AGENT,
+                "-protocol_whitelist", "http,https,tcp,tls,crypto"]
+        };
         let mut command = Command::new(&self.executable);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        let mut child = command.args(["-nostdin", "-v", "error", "-rw_timeout", "10000000",
-                "-user_agent", core_types::MEDIA_USER_AGENT,
-                "-protocol_whitelist", "http,https,tcp,tls,crypto",
-                "-ss", &position.as_secs_f64().to_string(), "-i", &stream.stream_url,
+        let mut child = command.args(["-nostdin", "-v", "error"]).args(&input_args)
+            .args(["-ss", &position, "-i", &input,
                 "-map", "0:a:0", "-vn", "-sn", "-dn", "-threads", "1",
                 "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"])
             .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn()
@@ -151,4 +197,41 @@ impl Source for FfmpegSource {
 }
 impl Drop for FfmpegSource {
     fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(path: &str, codec: AudioCodec) -> StreamInfo {
+        StreamInfo { stream_url: path.into(), codec, bitrate: None, source: StreamSource::Local, expires_at: None, hls: false }
+    }
+
+    #[test]
+    fn local_streams_require_absolute_paths() {
+        for relative in ["", "song.m4a", "music/song.mp3", "./song.mp3"] {
+            assert!(local_path(&local(relative, AudioCodec::Aac)).is_err(), "{relative}");
+        }
+        let absolute = std::env::temp_dir().join("youtify-song.m4a");
+        assert!(local_path(&local(absolute.to_str().unwrap(), AudioCodec::Aac)).is_ok());
+    }
+
+    #[test]
+    fn missing_local_file_error_does_not_echo_the_path() {
+        let path = std::env::temp_dir().join("youtify-missing-7f3a9c").join("private-name.m4a");
+        let stream = local(path.to_str().unwrap(), AudioCodec::Aac);
+        let Err(error) = open_local(&stream, Duration::ZERO, &describe(&stream)) else { panic!("opened a missing file") };
+        let message = error.to_string();
+        assert!(message.contains("local file") && !message.contains("private-name"), "{message}");
+    }
+
+    #[test]
+    fn ffmpeg_rejects_relative_local_and_non_http_inputs() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ffmpeg = FfmpegDecoder::new("ffmpeg-not-started");
+        for stream in [local("song.webm", AudioCodec::Opus),
+            StreamInfo { source: StreamSource::YouTube, ..local("file:///etc/passwd", AudioCodec::Opus) }] {
+            let Err(error) = ffmpeg.open(&stream, Duration::ZERO, runtime.handle(), Arc::default()) else { panic!("accepted input") };
+            assert!(!error.to_string().contains("Could not start"), "{error}");
+        }
+    }
 }

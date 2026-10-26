@@ -1,4 +1,5 @@
 //! Independent HTTP adapters. No playback, filesystem state, or external processes.
+pub mod deezer;
 pub mod soundcloud;
 pub mod spotify;
 pub mod youtube;

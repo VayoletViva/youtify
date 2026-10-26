@@ -8,6 +8,36 @@ use tokio::{runtime::Handle, sync::broadcast};
 
 const BLOCK_FRAMES: usize = 1024;
 const BLOCKS: usize = 96;
+/// Volume changes glide over this long; the UI sends SetVolume continuously
+/// while the slider moves, and a step per control read would click.
+const VOLUME_RAMP_MS: u64 = 20;
+
+/// Linear per-frame gain ramp. Retargeting restarts the ramp from the gain
+/// currently applied, so repeated updates never jump.
+#[derive(Debug, Clone, Copy)]
+struct Ramp { gain: f32, target: f32, step: f32, frames: u32 }
+
+impl Ramp {
+    fn new(gain: f32) -> Self { Self { gain, target: gain, step: 0.0, frames: 0 } }
+
+    fn retarget(&mut self, target: f32, frames: u32) {
+        if target == self.target { return; }
+        self.target = target;
+        if frames == 0 { self.gain = target; self.frames = 0; return; }
+        self.frames = frames;
+        self.step = (target - self.gain) / frames as f32;
+    }
+
+    /// Gain for the next frame (all its channels).
+    fn advance(&mut self) -> f32 {
+        if self.frames > 0 {
+            self.frames -= 1;
+            // Land exactly on the target; no float drift from summed steps.
+            self.gain = if self.frames == 0 { self.target } else { self.gain + self.step };
+        }
+        self.gain
+    }
+}
 
 pub(crate) struct Shared {
     pub stopped: AtomicBool,
@@ -220,13 +250,18 @@ pub(crate) struct Pipeline {
     fade_length: u64,
     paused: bool,
     volume: f32,
+    ramp: Ramp,
+    /// Sample index within the current output frame.
+    channel: usize,
     silence_remaining: usize,
 }
 
 impl Pipeline {
     pub fn new(controls: Receiver<Control>, shared: Arc<Shared>, events: broadcast::Sender<PlayerEvent>, channels: u16, rate: u32) -> Self {
+        // Start at the stored volume: no audible glide from 1.0 on startup.
+        let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
         Self { controls, shared, events, current: None, queue: VecDeque::with_capacity(2), channels, rate,
-            until_control: 0, fade_position: 0, fade_length: 0, paused: false, volume: 1.0, silence_remaining: 0 }
+            until_control: 0, fade_position: 0, fade_length: 0, paused: false, volume, ramp: Ramp::new(volume), channel: 0, silence_remaining: 0 }
     }
 
     fn samples_per_second(&self) -> u64 { self.channels as u64 * self.rate as u64 }
@@ -274,7 +309,9 @@ impl Pipeline {
             }
         }
         self.paused = self.shared.paused.load(Ordering::Relaxed);
-        self.volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
+        let target = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
+        let frames = (self.rate as u64 * VOLUME_RAMP_MS / 1000).min(u32::MAX as u64) as u32;
+        self.ramp.retarget(target, frames);
     }
 }
 
@@ -287,6 +324,10 @@ impl Iterator for Pipeline {
             self.until_control = 256 * self.channels as usize;
         }
         self.until_control -= 1;
+        // Output is frame-aligned (underruns pad whole frames), so the gain
+        // steps once per frame and every channel of a frame gets the same one.
+        if self.channel == 0 { self.volume = self.ramp.advance(); }
+        self.channel = (self.channel + 1) % self.channels.max(1) as usize;
         if self.paused { return Some(0.0); }
         if self.silence_remaining > 0 {
             self.silence_remaining -= 1;
@@ -448,6 +489,33 @@ mod tests {
         assert_eq!(pcm, vec![1.0, 1.0, 1.0, 0.0, 0.0]);
         assert_eq!(source.current.as_ref().unwrap().track.metadata.id, "b");
         assert_eq!(source.current.as_ref().unwrap().listened, 3);
+    }
+
+    #[test]
+    fn volume_ramp_is_linear_and_retargets_from_the_applied_gain() {
+        let mut ramp = Ramp::new(1.0);
+        ramp.retarget(0.0, 4);
+        let gains: Vec<f32> = (0..5).map(|_| ramp.advance()).collect();
+        assert_eq!(gains, vec![0.75, 0.5, 0.25, 0.0, 0.0]);
+        ramp.retarget(1.0, 4);
+        assert_eq!(ramp.advance(), 0.25);
+        ramp.retarget(0.25, 3); // slider moved back mid-ramp: glide, no jump
+        assert!((ramp.advance() - 0.25).abs() < 1e-6);
+        ramp.retarget(0.6, 0);
+        assert_eq!(ramp.advance(), 0.6);
+    }
+
+    #[test]
+    fn volume_change_ramps_with_one_gain_per_frame() {
+        let (tx, rx) = bounded(8);
+        let (events, _receiver) = broadcast::channel(32);
+        // Stereo at 100 Hz: the 20 ms ramp spans 2 frames.
+        let mut source = Pipeline::new(rx, Arc::new(Shared::default()), events, 2, 100);
+        assert!(tx.send(Control::Append(buffer("a", vec![1.0; 8], 40))).is_ok());
+        assert_eq!(source.next(), Some(1.0));
+        source.shared.volume.store(0.0f32.to_bits(), Ordering::Relaxed);
+        source.until_control = 0;
+        assert_eq!(source.by_ref().take(5).collect::<Vec<_>>(), vec![1.0, 0.5, 0.5, 0.0, 0.0]);
     }
 
     #[test]

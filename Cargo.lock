@@ -4307,6 +4307,7 @@ dependencies = [
  "core-types",
  "resolvers",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",

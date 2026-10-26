@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 core-types.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 thiserror.workspace = true
 rodio = { version = "0.21.1", default-features = false, features = ["playback", "symphonia-all"] }
 crossbeam-channel = "0.5"

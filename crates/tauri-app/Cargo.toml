@@ -22,3 +22,6 @@ tokio.workspace = true
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -28,6 +28,8 @@ pub enum AudioCodec {
 pub enum StreamSource {
     YouTube,
     SoundCloud,
+    /// A previously downloaded file; `stream_url` is an absolute filesystem path.
+    Local,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

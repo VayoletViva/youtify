@@ -11,7 +11,7 @@ pub use db::{Interaction, WaveDb};
 pub use features::{FeatureVector, TagClient};
 pub use recommender::{
     discover_tracks, DiscoveryReport, ScoredTrack, UserTasteProfile, WaveConfig, WaveQueue,
-    next_wave_batch,
+    next_wave_batch, next_wave_mix,
 };
 
 #[derive(Debug, thiserror::Error)]

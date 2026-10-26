@@ -13,6 +13,11 @@ const RESOLVE: &str = "SoundCloud [URL resolve]";
 const SEARCH: &str = "SoundCloud [track search]";
 const TRANSCODING: &str = "SoundCloud [transcoding lookup]";
 const MEDIA: &str = "SoundCloud [media availability probe]";
+const RELATED: &str = "SoundCloud [related tracks]";
+const STATION: &str = "SoundCloud [track station]";
+const HYDRATE: &str = "SoundCloud [track hydration]";
+/// Below this many playable `/related` hits, top up from the track station.
+const RELATED_MIN: usize = 5;
 
 pub struct SoundCloud {
     client: reqwest::Client,
@@ -77,11 +82,9 @@ impl SoundCloud {
     }
 
     async fn lookup(&self, input: &str) -> Result<Value, ResolverError> {
-        if let Some(id) = input.strip_prefix("soundcloud:track:") {
-            if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
-                return self.api(&format!("{API}/tracks/{id}"), &[], LOOKUP).await;
-            }
-            return Err(ResolverError::InvalidInput("invalid SoundCloud track ID".into()));
+        if input.starts_with("soundcloud:track:") {
+            let (id, _) = track_digits(input)?;
+            return self.api(&format!("{API}/tracks/{id}"), &[], LOOKUP).await;
         }
         let url = http::https_url(input, SERVICE)?;
         if !matches!(url.host_str(), Some("soundcloud.com" | "www.soundcloud.com" | "m.soundcloud.com")) {
@@ -91,25 +94,14 @@ impl SoundCloud {
     }
 
     async fn stream(&self, value: &Value, expected_ms: u64) -> Result<StreamInfo, ResolverError> {
-        if value["policy"].as_str().is_some_and(|p| p != "ALLOW") || value["streamable"].as_bool() != Some(true) {
+        if restricted(value) {
             return Err(ResolverError::Unavailable { service: SERVICE, message: "track is restricted or not streamable".into() });
         }
         let transcodings = value.pointer("/media/transcodings").and_then(Value::as_array)
             .ok_or_else(|| parse_error(SERVICE, "transcodings missing"))?;
         let mut formats: Vec<_> = transcodings.iter().filter_map(|t| {
-            if t["snipped"].as_bool() == Some(true) { return None; }
-            let duration = t["duration"].as_u64()?;
-            if !duration_matches(expected_ms, duration) { return None; }
-            let protocol = t.pointer("/format/protocol")?.as_str()?;
-            if !matches!(protocol, "hls" | "progressive") { return None; }
-            let mime = t.pointer("/format/mime_type")?.as_str()?;
-            let codec = if mime.contains("opus") { AudioCodec::Opus }
-                else if mime == "audio/mp4; codecs=\"mp4a.40.2\"" { AudioCodec::Aac }
-                // "audio/mpegurl" is an adaptive variant (observed HTTP 404), not MP3.
-                else if mime == "audio/mpeg" { AudioCodec::Mp3 } else { return None; };
-            // Most uploads now offer only HLS AAC (fMP4); the native decoder reads
-            // those sequentially. Opus still needs FFmpeg.
-            if self.native_only && codec == AudioCodec::Opus { return None; }
+            if !duration_matches(expected_ms, t["duration"].as_u64()?) { return None; }
+            let (codec, protocol) = transcoding_format(t, self.native_only)?;
             Some((t, codec, protocol))
         }).collect();
         formats.sort_by_key(|(_, codec, protocol)| (
@@ -154,6 +146,78 @@ impl SoundCloud {
                 "no full-length Opus/AAC/MP3 stream within duration tolerance"
             }.into(),
         }))
+    }
+
+    /// Text search returning up to `limit` full-length, playable tracks.
+    pub async fn search_tracks(&self, query: &str, limit: usize) -> Result<Vec<TrackMetadata>, ResolverError> {
+        let query = query.trim();
+        if query.is_empty() { return Err(ResolverError::InvalidInput("empty search query".into())); }
+        if limit == 0 { return Ok(Vec::new()); }
+        // Always ask for the 50-item maximum: the playable filter drops previews and blocks.
+        let result = self.api(&format!("{API}/search/tracks"), &[("q", query), ("limit", "50")], SEARCH).await?;
+        let items = result["collection"].as_array().ok_or_else(|| parse_error(SEARCH, "search collection missing"))?;
+        let tracks = self.playable_tracks(items, None, &[], limit);
+        if tracks.is_empty() { return Err(ResolverError::NotFound { service: SERVICE, query: query.into() }); }
+        Ok(tracks)
+    }
+
+    /// Full-length, playable tracks related to a `soundcloud:track:<id>` seed.
+    pub async fn related(&self, track_id: &str, limit: usize) -> Result<Vec<TrackMetadata>, ResolverError> {
+        let (id, seed) = track_digits(track_id)?;
+        if limit == 0 { return Ok(Vec::new()); }
+        let mut last_error = None;
+        // `/related` is a single page (no next_href; offset returns nothing).
+        let mut tracks = match self.api(&format!("{API}/tracks/{id}/related"), &[("limit", "50")], RELATED).await {
+            Ok(result) => match result["collection"].as_array() {
+                Some(items) => self.playable_tracks(items, Some(seed), &[], limit),
+                None => { last_error = Some(parse_error(RELATED, "related collection missing")); Vec::new() }
+            },
+            Err(error @ ResolverError::RateLimited { .. }) => return Err(error),
+            Err(error) => { last_error = Some(error); Vec::new() }
+        };
+        // Major-label seeds get few related hits; the track station tops them up.
+        if tracks.len() < RELATED_MIN.min(limit) {
+            match self.station(id, seed, &tracks, limit - tracks.len()).await {
+                Ok(more) => tracks.extend(more),
+                Err(error @ ResolverError::RateLimited { .. }) => return Err(error),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if tracks.is_empty() {
+            return Err(last_error.unwrap_or_else(|| ResolverError::NotFound { service: SERVICE, query: track_id.into() }));
+        }
+        Ok(tracks)
+    }
+
+    /// Station tracks for `id`, hydrated and filtered, skipping `seed` and `known`.
+    async fn station(&self, id: &str, seed: u64, known: &[TrackMetadata], limit: usize)
+        -> Result<Vec<TrackMetadata>, ResolverError> {
+        let track = self.api(&format!("{API}/tracks/{id}"), &[], LOOKUP).await?;
+        let urn = string(&track, "/station_urn").ok_or_else(|| parse_error(STATION, "station_urn missing"))?;
+        if !valid_station_urn(&urn) { return Err(parse_error(STATION, "unexpected station_urn")); }
+        let station = self.api(&format!("{API}/system-playlists/{urn}"), &[], STATION).await?;
+        let stubs = station["tracks"].as_array().ok_or_else(|| parse_error(STATION, "station tracks missing"))?;
+        let ids = station_ids(stubs, seed, known);
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let joined = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let hydrated = self.api(&format!("{API}/tracks"), &[("ids", &joined)], HYDRATE).await?;
+        let items = hydrated.as_array().ok_or_else(|| parse_error(HYDRATE, "track array missing"))?;
+        // `/tracks?ids=` does not promise station order; restore it.
+        let ordered: Vec<Value> = ids.iter()
+            .filter_map(|want| items.iter().find(|item| item["id"].as_u64() == Some(*want)).cloned()).collect();
+        Ok(self.playable_tracks(&ordered, Some(seed), known, limit))
+    }
+
+    /// Parses up to `limit` playable tracks, dropping `exclude`, `known` and duplicates.
+    fn playable_tracks(&self, items: &[Value], exclude: Option<u64>, known: &[TrackMetadata], limit: usize)
+        -> Vec<TrackMetadata> {
+        let mut seen = std::collections::HashSet::new();
+        items.iter()
+            .filter(|item| playable(item, self.native_only))
+            .filter(|item| item["id"].as_u64().is_some_and(|id| Some(id) != exclude && seen.insert(id)))
+            .filter_map(|item| parse_track(item).ok())
+            .filter(|track| !known.iter().any(|k| k.id == track.id))
+            .take(limit).collect()
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Value>, ResolverError> {
@@ -281,6 +345,68 @@ fn public_script_urls(html: &str) -> Result<Vec<url::Url>, ResolverError> {
         }
     }
     Ok(urls)
+}
+
+/// `soundcloud:track:<digits>` -> (digits, numeric ID); anything else is rejected
+/// before it reaches a URL path.
+fn track_digits(track_id: &str) -> Result<(&str, u64), ResolverError> {
+    track_id.strip_prefix("soundcloud:track:")
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|id| Some((id, id.parse().ok()?)))
+        .ok_or_else(|| ResolverError::InvalidInput("invalid SoundCloud track ID".into()))
+}
+
+/// The station URN goes into a URL path: accept only the observed shape.
+fn valid_station_urn(urn: &str) -> bool {
+    urn.strip_prefix("soundcloud:system-playlists:").is_some_and(|rest| !rest.is_empty())
+        && urn.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_'))
+}
+
+/// Station stub IDs worth hydrating: at most 50 (one `/tracks?ids=` call), in order.
+fn station_ids(stubs: &[Value], seed: u64, known: &[TrackMetadata]) -> Vec<u64> {
+    let mut ids: Vec<u64> = Vec::new();
+    for stub in stubs {
+        let Some(id) = stub["id"].as_u64() else { continue };
+        // Stubs carry policy: skip SNIP/BLOCK before spending a hydration slot.
+        if stub["policy"].as_str().is_some_and(|p| p != "ALLOW") || id == seed || ids.contains(&id)
+            || known.iter().any(|k| k.id == format!("soundcloud:track:{id}")) { continue; }
+        ids.push(id);
+        if ids.len() == 50 { break; }
+    }
+    ids
+}
+
+fn restricted(value: &Value) -> bool {
+    value["policy"].as_str().is_some_and(|p| p != "ALLOW") || value["streamable"].as_bool() != Some(true)
+}
+
+/// Codec and protocol of a transcoding `stream()` can play, ignoring duration.
+fn transcoding_format(t: &Value, native_only: bool) -> Option<(AudioCodec, &str)> {
+    if t["snipped"].as_bool() == Some(true) { return None; }
+    // Encrypted variants ("cbc-encrypted-hls", ...) need DRM and fall out here.
+    let protocol = t.pointer("/format/protocol")?.as_str()?;
+    if !matches!(protocol, "hls" | "progressive") { return None; }
+    let mime = t.pointer("/format/mime_type")?.as_str()?;
+    let codec = if mime.contains("opus") { AudioCodec::Opus }
+        else if mime == "audio/mp4; codecs=\"mp4a.40.2\"" { AudioCodec::Aac }
+        // "audio/mpegurl" is an adaptive variant (observed HTTP 404), not MP3.
+        else if mime == "audio/mpeg" { AudioCodec::Mp3 } else { return None; };
+    // Most uploads now offer only HLS AAC (fMP4); the native decoder reads
+    // those sequentially. Opus still needs FFmpeg.
+    if native_only && codec == AudioCodec::Opus { return None; }
+    Some((codec, protocol))
+}
+
+/// True when `stream()` would find a full-length candidate for this track, so
+/// recommendation queues are not filled with previews, geo-blocks or DRM-only uploads.
+fn playable(value: &Value, native_only: bool) -> bool {
+    if restricted(value) { return false; }
+    let Some(duration) = value["duration"].as_u64().filter(|d| *d > 0) else { return false };
+    // SNIP previews report duration 30000 against the real full_duration.
+    if value["full_duration"].as_u64().is_some_and(|full| !duration_matches(full, duration)) { return false; }
+    value.pointer("/media/transcodings").and_then(Value::as_array).is_some_and(|ts| ts.iter().any(|t|
+        t["duration"].as_u64().is_some_and(|d| duration_matches(duration, d))
+            && transcoding_format(t, native_only).is_some()))
 }
 
 fn parse_track(value: &Value) -> Result<TrackMetadata, ResolverError> {
@@ -496,6 +622,110 @@ mod tests {
                 }
                 (error, _) => panic!("unexpected error: {error}"),
             }
+        }
+    }
+
+
+    fn playable_fixture() -> Value {
+        json!({"kind": "track", "id": 7, "title": "Song", "duration": 200000, "full_duration": 200000,
+            "policy": "ALLOW", "streamable": true, "user": {"username": "Artist"},
+            "media": {"transcodings": [{"duration": 200000, "snipped": false,
+                "format": {"protocol": "hls", "mime_type": "audio/mp4; codecs=\"mp4a.40.2\""},
+                "url": "https://api-v2.soundcloud.com/media/x"}]}})
+    }
+
+    #[test]
+    fn playable_filter_matches_stream_selection() {
+        let value = playable_fixture();
+        assert!(playable(&value, false) && playable(&value, true));
+        let mut absent = value.clone();
+        absent.as_object_mut().unwrap().remove("policy");
+        assert!(playable(&absent, true));
+        for (pointer, replacement) in [
+            ("/policy", json!("SNIP")),
+            ("/policy", json!("BLOCK")),
+            ("/streamable", json!(false)),
+            ("/duration", json!(0)),
+            // SNIP previews: 30 s duration against the full length.
+            ("/duration", json!(30000)),
+            ("/media/transcodings/0/snipped", json!(true)),
+            ("/media/transcodings/0/duration", json!(30000)),
+            ("/media/transcodings/0/format/protocol", json!("cbc-encrypted-hls")),
+            ("/media/transcodings/0/format/protocol", json!("ctr-encrypted-hls")),
+            ("/media/transcodings/0/format/mime_type", json!("audio/mpegurl")),
+            ("/media/transcodings", json!([])),
+        ] {
+            let mut candidate = value.clone();
+            *candidate.pointer_mut(pointer).unwrap() = replacement;
+            assert!(!playable(&candidate, false), "{pointer}");
+        }
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("media");
+        assert!(!playable(&missing, false));
+    }
+
+    #[test]
+    fn playable_filter_respects_native_opus_and_any_usable_variant() {
+        let mut opus = playable_fixture();
+        opus["media"]["transcodings"][0]["format"]["mime_type"] = json!("audio/ogg; codecs=\"opus\"");
+        assert!(playable(&opus, false));
+        assert!(!playable(&opus, true));
+        // One encrypted and one usable MP3 variant: the usable one wins.
+        let mut mixed = playable_fixture();
+        mixed["media"]["transcodings"] = json!([
+            {"duration": 200000, "format": {"protocol": "ctr-encrypted-hls", "mime_type": "audio/mp4; codecs=\"mp4a.40.2\""}},
+            {"duration": 200000, "format": {"protocol": "progressive", "mime_type": "audio/mpeg"}},
+        ]);
+        assert!(playable(&mixed, true));
+    }
+
+    #[test]
+    fn playable_tracks_drop_seed_duplicates_and_known() {
+        let resolver = SoundCloud::new_native().unwrap();
+        let mut items = Vec::new();
+        for id in [1, 2, 2, 3, 4, 5] {
+            let mut item = playable_fixture();
+            item["id"] = json!(id);
+            items.push(item);
+        }
+        items[4]["policy"] = json!("BLOCK");
+        let known = parse_track(&items[3]).unwrap();
+        let tracks = resolver.playable_tracks(&items, Some(1), &[known], 10);
+        assert_eq!(tracks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["soundcloud:track:2", "soundcloud:track:5"]);
+        assert_eq!(resolver.playable_tracks(&items, None, &[], 1).len(), 1);
+    }
+
+    #[test]
+    fn station_stubs_skip_restricted_seed_and_cap_at_fifty() {
+        let mut stubs: Vec<Value> = (1..=60).map(|id| json!({"id": id, "kind": "track", "policy": "ALLOW"})).collect();
+        stubs[1]["policy"] = json!("SNIP");
+        stubs.push(json!({"id": 3, "policy": "ALLOW"}));
+        stubs.insert(0, json!({"kind": "track"}));
+        let known = parse_track(&playable_fixture()).unwrap();
+        let ids = station_ids(&stubs, 1, &[known]);
+        assert_eq!(ids.len(), 50);
+        assert_eq!(&ids[..3], &[3, 4, 5]);
+        assert!(!ids.contains(&7) && !ids.contains(&2));
+    }
+
+    #[tokio::test]
+    async fn related_rejects_invalid_ids_before_requests() {
+        let resolver = SoundCloud::new().unwrap();
+        assert_eq!(track_digits("soundcloud:track:123").unwrap(), ("123", 123));
+        for id in ["", "123", "soundcloud:track:", "soundcloud:track:12a", "soundcloud:track:1/related",
+            "soundcloud:playlist:1", "youtube:video:dQw4w9WgXcQ", "soundcloud:track:99999999999999999999999"] {
+            assert!(matches!(resolver.related(id, 10).await.unwrap_err(), ResolverError::InvalidInput(_)), "{id}");
+        }
+        assert!(matches!(resolver.search_tracks("  ", 10).await.unwrap_err(), ResolverError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn station_urn_shape() {
+        assert!(valid_station_urn("soundcloud:system-playlists:track-stations:2336237564"));
+        for urn in ["", "soundcloud:system-playlists:", "soundcloud:tracks:1",
+            "soundcloud:system-playlists:x/../../me", "soundcloud:system-playlists:x?client_id=y"] {
+            assert!(!valid_station_urn(urn), "{urn}");
         }
     }
 

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "tsc -p tsconfig.test.json && esbuild src/theme.test.ts --bundle --platform=node --format=esm --outfile=.test/theme.test.js && node --test .test/theme.test.js",
+    "test": "tsc -p tsconfig.test.json && esbuild src/theme.test.ts src/format.test.ts --bundle --platform=node --format=esm --outdir=.test && node --test .test/theme.test.js .test/format.test.js",
     "tauri": "cd ../crates/tauri-app && tauri"
   },
   "dependencies": {

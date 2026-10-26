@@ -1,5 +1,6 @@
 //! Bounded, worker-decoded playback through one permanent output source.
 pub mod decoder;
+pub mod download;
 mod engine;
 mod gapless;
 pub mod hls;

@@ -14,6 +14,10 @@ const BOOTSTRAP_TRACK: &str = "4cOdK2wGLETKBW3PvgPWqT";
 const METADATA_TTL: Duration = Duration::from_secs(5 * 60);
 const METADATA_CAPACITY: usize = 64;
 const EMBED: &str = "embed";
+const OEMBED: &str = "oembed";
+// Album-art size prefixes in Spotify image IDs: 300px (what oEmbed returns) and 640px.
+const COVER_300: &str = "/image/ab67616d00001e02";
+const COVER_640: &str = "/image/ab67616d0000b273";
 
 /// Spotify rate-limits anonymous Web API endpoints independently: `/v1/tracks`
 /// can return a day-long 429 while `/v1/search` still answers. One shared
@@ -203,11 +207,8 @@ impl MetadataProvider for Spotify {
         let track = if let Some(id) = id {
             self.track_id(&id).await?
         } else {
-            let data = self.api("https://api.spotify.com/v1/search", &[("q", input), ("type", "track"), ("limit", "1")]).await?;
-            let track = data.pointer("/tracks/items/0").ok_or_else(|| ResolverError::NotFound {
-                service: SERVICE, query: input.into(),
-            })?;
-            parse_track(track)?
+            // search never returns an empty Ok, so the first item exists.
+            self.search(input, 1).await?.swap_remove(0)
         };
         cache.insert(key, track.clone(), Instant::now());
         Ok(track)
@@ -231,7 +232,44 @@ impl MetadataProvider for Spotify {
     }
 }
 
+/// Public oEmbed data; reachable even where embeds answer 451. Title only, no artists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpotifyOEmbed {
+    pub title: String,
+    pub cover_url: Option<String>,
+}
+
 impl Spotify {
+    /// Text search returning up to `limit` tracks (anonymous Web API).
+    /// Where the embed is geo-blocked the token bootstrap fails with
+    /// `Http { status: 451 }`, which callers use to fall back to Deezer.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<TrackMetadata>, ResolverError> {
+        let query = query.trim();
+        if query.is_empty() { return Err(ResolverError::InvalidInput("empty search query".into())); }
+        // The Web API rejects limit=0 and anything above 50.
+        let limit = limit.clamp(1, 50).to_string();
+        let data = self.api("https://api.spotify.com/v1/search",
+            &[("q", query), ("type", "track"), ("limit", &limit)]).await?;
+        let tracks = search_tracks(&data)?;
+        if tracks.is_empty() { return Err(ResolverError::NotFound { service: SERVICE, query: query.into() }); }
+        Ok(tracks)
+    }
+
+    /// oEmbed for a track/playlist URL, URI or bare ID of `kind`.
+    pub async fn oembed(&self, input: &str, kind: &str) -> Result<SpotifyOEmbed, ResolverError> {
+        // `kind` becomes a path segment; accept only entity types oEmbed serves.
+        if !matches!(kind, "track" | "playlist" | "album" | "artist") {
+            return Err(ResolverError::InvalidInput(format!("unsupported Spotify oEmbed kind: {kind}")));
+        }
+        let id = spotify_id(input.trim(), kind)?
+            .ok_or_else(|| ResolverError::InvalidInput(format!("expected Spotify {kind} URL, URI or ID")))?;
+        let canonical = format!("https://open.spotify.com/{kind}/{id}");
+        // Own bucket: an oEmbed 429 must not block embeds or the Web API, and vice versa.
+        let body = self.text(self.client.get("https://open.spotify.com/oembed")
+            .query(&[("url", canonical.as_str())]), OEMBED).await?;
+        parse_oembed(&body, kind)
+    }
+
     async fn api_playlist(&self, id: &str) -> Result<Vec<TrackMetadata>, ResolverError> {
         let mut next = Some(format!("https://api.spotify.com/v1/playlists/{id}/tracks?limit=100"));
         let mut tracks = Vec::new();
@@ -271,6 +309,23 @@ fn cooldown_seconds(retry_at: Option<Instant>, now: Instant) -> Option<u64> {
     retry_at.and_then(|deadline| deadline.checked_duration_since(now))
         .filter(|remaining| !remaining.is_zero())
         .map(|remaining| remaining.as_secs().saturating_add(u64::from(remaining.subsec_nanos() > 0)))
+}
+
+/// Search items can be null or local/unavailable shapes; skip what does not parse.
+fn search_tracks(data: &Value) -> Result<Vec<TrackMetadata>, ResolverError> {
+    let items = data.pointer("/tracks/items").and_then(Value::as_array)
+        .ok_or_else(|| parse_error(SERVICE, "search tracks.items missing"))?;
+    Ok(items.iter().filter_map(|item| parse_track(item).ok()).collect())
+}
+
+/// oEmbed carries only the entity name and a 300px thumbnail: no artists or duration.
+fn parse_oembed(body: &str, kind: &str) -> Result<SpotifyOEmbed, ResolverError> {
+    let data: Value = serde_json::from_str(body).map_err(|e| parse_error(SERVICE, e.to_string()))?;
+    let title = required_string(&data, "/title", SERVICE)?;
+    let cover_url = string(&data, "/thumbnail_url").filter(|url| url.starts_with("https://"))
+        // Only album art (tracks) has the 640px variant; playlist mosaics use other prefixes.
+        .map(|url| if kind == "track" { url.replacen(COVER_300, COVER_640, 1) } else { url });
+    Ok(SpotifyOEmbed { title, cover_url })
 }
 
 fn embed_entity(data: &Value) -> Result<Value, ResolverError> {
@@ -684,4 +739,121 @@ fn parse_track(value: &Value) -> Result<TrackMetadata, ResolverError> {
         album: string(value, "/album/name"),
         isrc: string(value, "/external_ids/isrc").or_else(|| string(value, "/isrc")),
     })
+}
+
+#[cfg(test)]
+mod oembed_search_tests {
+    use super::*;
+    use serde_json::json;
+
+    // Live shapes from open.spotify.com/oembed (html/iframe fields trimmed).
+    const TRACK_OEMBED: &str = r#"{"version":"1.0","provider_name":"Spotify","type":"rich",
+        "title":"Never Gonna Give You Up",
+        "thumbnail_url":"https://image-cdn-ak.spotifycdn.com/image/ab67616d00001e02baf89eb11ec7c657805d2da0",
+        "thumbnail_width":300,"thumbnail_height":300}"#;
+    const PLAYLIST_OEMBED: &str = r#"{"version":"1.0","provider_name":"Spotify","type":"rich",
+        "title":"Today’s Top Hits",
+        "thumbnail_url":"https://i.scdn.co/image/ab67706f00000002e8ccdd567fff6a597b87586b",
+        "thumbnail_width":300,"thumbnail_height":300}"#;
+
+    #[test]
+    fn track_oembed_upgrades_cover_to_640() {
+        let oembed = parse_oembed(TRACK_OEMBED, "track").unwrap();
+        assert_eq!(oembed.title, "Never Gonna Give You Up");
+        // Verified live: the b273 variant of the same image ID serves 640px.
+        assert_eq!(oembed.cover_url.as_deref(),
+            Some("https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b273baf89eb11ec7c657805d2da0"));
+    }
+
+    #[test]
+    fn playlist_oembed_keeps_mosaic_cover() {
+        let oembed = parse_oembed(PLAYLIST_OEMBED, "playlist").unwrap();
+        assert_eq!(oembed.title, "Today’s Top Hits");
+        assert_eq!(oembed.cover_url.as_deref(),
+            Some("https://i.scdn.co/image/ab67706f00000002e8ccdd567fff6a597b87586b"));
+        // A 300px prefix in a non-track thumbnail is left alone too.
+        let other = parse_oembed(&json!({"title": "A", "thumbnail_url":
+            "https://i.scdn.co/image/ab67616d00001e02x"}).to_string(), "album").unwrap();
+        assert_eq!(other.cover_url.as_deref(), Some("https://i.scdn.co/image/ab67616d00001e02x"));
+    }
+
+    #[test]
+    fn oembed_requires_title_and_drops_unsafe_cover() {
+        for body in ["{", "[]", r#"{"thumbnail_url":"https://i.scdn.co/image/x"}"#, r#"{"title":""}"#] {
+            assert!(matches!(parse_oembed(body, "track"), Err(ResolverError::Parse { .. })), "{body}");
+        }
+        for thumb in [json!("http://i.scdn.co/image/x"), json!(""), json!(5), Value::Null] {
+            let body = json!({"title": "T", "thumbnail_url": thumb}).to_string();
+            assert_eq!(parse_oembed(&body, "track").unwrap(), SpotifyOEmbed { title: "T".into(), cover_url: None });
+        }
+    }
+
+    #[tokio::test]
+    async fn oembed_rejects_non_spotify_input_without_io() {
+        let spotify = Spotify::new().unwrap();
+        // A cooldown makes any accidental request fail as RateLimited rather than hit the network.
+        spotify.set_cooldown(OEMBED, Duration::from_secs(60)).await;
+        for (input, kind) in [
+            ("https://example.com/track/4cOdK2wGLETKBW3PvgPWqT", "track"),
+            ("never gonna give you up", "track"),
+            ("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M", "track"),
+            ("https://open.spotify.com/track/short", "track"),
+            ("4cOdK2wGLETKBW3PvgPWqT", "episode"),
+            ("4cOdK2wGLETKBW3PvgPWqT", "../track"),
+        ] {
+            assert!(matches!(spotify.oembed(input, kind).await, Err(ResolverError::InvalidInput(_))), "{input} {kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oembed_limit_is_its_own_bucket() {
+        let spotify = Spotify::new().unwrap();
+        spotify.set_cooldown(OEMBED, Duration::from_secs(60)).await;
+        let result = spotify.oembed("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=x", "track").await;
+        assert!(matches!(result, Err(ResolverError::RateLimited { .. })));
+        assert!(spotify.check_cooldown(EMBED).await.is_ok());
+        assert!(spotify.check_cooldown("api:search").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn search_validates_query_and_respects_search_cooldown() {
+        let spotify = Spotify::new().unwrap();
+        assert!(matches!(spotify.search("   ", 5).await, Err(ResolverError::InvalidInput(_))));
+        spotify.set_cooldown("api:search", Duration::from_secs(60)).await;
+        assert!(matches!(spotify.search("rick astley", 0).await, Err(ResolverError::RateLimited { .. })));
+        // The text path of track() goes through search and must not bootstrap a token either.
+        assert!(matches!(spotify.track("rick astley").await, Err(ResolverError::RateLimited { .. })));
+        assert!(spotify.session.lock().await.is_none());
+        assert!(!spotify.cooldowns.lock().await.contains_key(EMBED));
+    }
+
+    #[test]
+    fn search_items_skip_unparseable_entries() {
+        let good = |id: &str, name: &str| json!({
+            "uri": format!("spotify:track:{id}"), "name": name, "duration_ms": 213573,
+            "artists": [{"name": "Rick Astley"}],
+            "album": {"name": "Whenever You Need Somebody", "images": [
+                {"url": "https://i.scdn.co/image/small", "width": 64, "height": 64},
+                {"url": "https://i.scdn.co/image/large", "width": 640, "height": 640}
+            ]},
+            "external_ids": {"isrc": "GBARL9300135"}
+        });
+        let data = json!({"tracks": {"items": [
+            good("4cOdK2wGLETKBW3PvgPWqT", "Never Gonna Give You Up"),
+            Value::Null,
+            {"uri": "spotify:local:a:b:c:1", "name": "Local", "duration_ms": 1, "artists": [{"name": "X"}]},
+            {"uri": "spotify:track:noartists000000000000", "name": "X", "duration_ms": 1, "artists": []},
+            {"uri": "spotify:track:noduration00000000000", "name": "X", "artists": [{"name": "X"}]},
+            good("7GhIk7Il098yCjg4BQjzvb", "Together Forever"),
+        ]}});
+        let tracks = search_tracks(&data).unwrap();
+        assert_eq!(tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            ["Never Gonna Give You Up", "Together Forever"]);
+        assert_eq!(tracks[0].cover_url.as_deref(), Some("https://i.scdn.co/image/large"));
+        assert_eq!(tracks[0].isrc.as_deref(), Some("GBARL9300135"));
+        assert!(search_tracks(&json!({"tracks": {"items": []}})).unwrap().is_empty());
+        for missing in [json!({}), json!({"tracks": {}}), json!({"tracks": {"items": {}}})] {
+            assert!(matches!(search_tracks(&missing), Err(ResolverError::Parse { .. })));
+        }
+    }
 }

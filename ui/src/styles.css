@@ -89,7 +89,10 @@ button:not(:disabled):focus-visible::after, button:not(:disabled):active::after 
 .nav-item.active .indicator::before { transform: none; opacity: 1; }
 .nav-item:active .indicator > svg { transform: scale(.92); }
 
-main { margin-left: var(--nav-rail); padding: 0 24px calc(var(--mini-player) + 48px); max-width: calc(1040px + var(--nav-rail)); }
+/* clip (not hidden): guards against stray horizontal overflow without making main a scroll container,
+   so the sticky app bar keeps working. A root-level clip would not stop focus from panning the page. */
+main { margin-left: var(--nav-rail); padding: 0 24px calc(var(--mini-player) + 48px); max-width: calc(1040px + var(--nav-rail));
+  overflow-x: clip; }
 .top-app-bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   min-height: 64px; padding: max(8px, env(safe-area-inset-top)) 0 8px; background: var(--md-sys-color-surface);
   transition: background-color var(--dur-long) var(--easing); }
@@ -146,7 +149,7 @@ body.playing .play-toggle .icon-pause { display: block; }
 
 /* Search */
 #search-form { display: grid; gap: 12px; }
-.search-bar { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 16px; border-radius: var(--shape-full);
+.search-bar { position: relative; display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 16px; border-radius: var(--shape-full);
   background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface-variant); }
 .search-bar:focus-within { outline: 2px solid var(--md-sys-color-primary); }
 .search-bar input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; font: var(--body-large);
@@ -154,8 +157,10 @@ body.playing .play-toggle .icon-pause { display: block; }
 .search-bar input::placeholder { color: var(--md-sys-color-on-surface-variant); }
 .search-bar input::-webkit-search-cancel-button { filter: grayscale(1); }
 .chip-set { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
-.filter-chip { flex-shrink: 0; cursor: pointer; }
-.filter-chip input { position: absolute; opacity: 0; pointer-events: none; }
+/* relative: the hidden radio must be positioned inside its chip. Static chips made the document its containing
+   block, so the radios stretched scrollWidth past the screen and focusing a chip panned the page on Android. */
+.filter-chip { position: relative; flex-shrink: 0; cursor: pointer; }
+.filter-chip input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; pointer-events: none; }
 .filter-chip span { position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 8px; height: 32px;
   padding: 0 16px; border-radius: var(--shape-s); border: 1px solid var(--md-sys-color-outline-variant);
   font: var(--label-large); color: var(--md-sys-color-on-surface-variant); transition: background-color var(--dur-short); }
@@ -170,24 +175,43 @@ body.playing .play-toggle .icon-pause { display: block; }
   animation: indeterminate 1.4s var(--easing) infinite; }
 @keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
 
-/* Lists */
+/* Lists: .track-item holds the play button (.track-row) and a trailing action; buttons can't nest. */
 .list { display: grid; margin: 8px -8px 0; }
-.track-row { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 72px; padding: 8px 16px 8px 8px;
+.track-item { display: flex; align-items: center; min-width: 0; border-radius: var(--shape-l); color: var(--md-sys-color-on-surface);
+  transition: background-color var(--dur-medium) var(--easing), color var(--dur-medium) var(--easing); }
+.track-item.current { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
+.track-item .track-action { margin-right: 4px; color: inherit; }
+.track-row { display: flex; align-items: center; gap: 16px; flex: 1; min-width: 0; min-height: 72px; padding: 8px 8px 8px 8px;
   text-align: left; border-radius: var(--shape-l); color: var(--md-sys-color-on-surface);
   transition: background-color var(--dur-medium) var(--easing), color var(--dur-medium) var(--easing), transform var(--dur-short) var(--easing); }
 .track-row:not(:disabled):active { transform: scale(.985); }
 .track-row::after { transition-duration: var(--dur-medium); }
 /* Entering rows: short fade/rise, delay capped at 10 rows (--i set in main.ts). */
-.track-row.enter { animation: row-in var(--dur-medium) var(--easing-decel) backwards; animation-delay: calc(var(--i, 0) * 30ms); }
+.track-item.enter { animation: row-in var(--dur-medium) var(--easing-decel) backwards; animation-delay: calc(var(--i, 0) * 30ms); }
 @keyframes row-in { from { opacity: 0; transform: translateY(6px); } }
-.track-row.current { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .track-row .track-copy { flex: 1; }
-.track-length { font: var(--label-medium); font-variant-numeric: tabular-nums; color: var(--md-sys-color-on-surface-variant); }
-.track-row.current .track-copy > span, .track-row.current .track-length { color: inherit; opacity: .8; }
+.track-length { flex-shrink: 0; white-space: nowrap; font: var(--label-medium); font-variant-numeric: tabular-nums; color: var(--md-sys-color-on-surface-variant); }
+.track-item.current .track-copy > span, .track-item.current .track-length { color: inherit; opacity: .8; }
 .track-copy { display: grid; gap: 2px; min-width: 0; }
 .track-copy strong, .track-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-copy strong { font: var(--body-large); font-weight: 400; }
 .track-copy > span { font: var(--body-medium); color: var(--md-sys-color-on-surface-variant); }
+/* Download state: ring = progress (dash offset set in main.ts), check = offline copy. */
+.track-action { flex-shrink: 0; color: var(--md-sys-color-on-surface-variant); }
+.track-action[data-kind="done"] { color: var(--md-sys-color-primary); }
+.track-item.current .track-action[data-kind="done"] { color: inherit; }
+.ring { transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 2.5; }
+.ring-track { stroke: currentColor; opacity: .24; }
+.ring-value { stroke: var(--md-sys-color-primary); stroke-linecap: round; stroke-dasharray: 100;
+  transition: stroke-dashoffset 250ms linear; }
+.track-item.current .ring-value { stroke: currentColor; }
+.ring.indeterminate { animation: spin 1.1s linear infinite; }
+@keyframes spin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+.delete-action[data-confirm="true"] { background: var(--md-sys-color-error-container, #93000a); color: var(--md-sys-color-on-error-container, #ffdad6); }
+/* Wave is fetching online: the play icon breathes until the backend clears Snapshot.discovering. */
+.discovering svg { animation: pulse 1.2s var(--easing) infinite alternate; }
+@keyframes pulse { to { opacity: .35; transform: scale(.85); } }
 .empty-state { padding: 48px 24px; text-align: center; font: var(--body-large); color: var(--md-sys-color-on-surface-variant); }
 #queue-mode { margin: 8px 0; }
 .app-status { margin-top: 24px; font: var(--body-small); color: var(--md-sys-color-on-surface-variant); overflow-wrap: anywhere; }
@@ -248,7 +272,6 @@ dialog[open].closing::backdrop { animation: fade-out var(--dur-medium) var(--eas
   background: var(--md-sys-color-on-surface-variant); opacity: .4; }
 .sheet-header { display: flex; align-items: center; justify-content: space-between; margin: 0 -12px 8px; }
 .sheet-label { font: var(--title-small); color: var(--md-sys-color-on-surface-variant); }
-.icon-spacer { width: 48px; }
 .hero-cover { width: 100%; aspect-ratio: 1; border-radius: var(--shape-xl); box-shadow: var(--elev-1); }
 .hero-cover .cover-fallback { width: 33%; height: 33%; }
 .sheet-track { margin: 28px 0 8px; min-width: 0; }
@@ -273,7 +296,7 @@ dialog[open].closing::backdrop { animation: fade-out var(--dur-medium) var(--eas
 .snackbar.leaving { animation: snack-out var(--dur-short) var(--easing) both; }
 @keyframes snack-out { to { opacity: 0; transform: translate(-50%, 8px); } }
 
-#home-view, #search-view, #queue-view { animation: fade-through var(--dur-medium) var(--easing-decel); }
+#home-view, #search-view, #queue-view, #downloads-view { animation: fade-through var(--dur-medium) var(--easing-decel); }
 @keyframes fade-through { from { opacity: 0; transform: translateY(8px); } }
 
 @media (max-width: 900px) { .player-extra { display: none; } }
