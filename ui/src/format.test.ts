@@ -1,4 +1,4 @@
-import { downloadPercent, errorText, formatSize, formatTime, waitText } from './format.js';
+import { clampSeek, downloadPercent, errorText, formatSize, formatTime, searchEmptyText, sourceLabels, waitText } from './format.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -23,3 +23,18 @@ assert(errorText('wave: online discovery found nothing').startsWith('Не наш
 assert(errorText('Spotify: HTTP 451; SoundCloud: no match for x').includes('Deezer и SoundCloud'), 'Fallback miss');
 assert(errorText('Spotify: HTTP 451').includes('Deezer'), 'Region block mentions automatic Deezer fallback');
 assert(errorText('something new') === 'something new', 'Unknown errors pass through');
+
+assert(clampSeek(-5, 10_000) === 0, 'Seek below zero clamps to 0');
+assert(clampSeek(Number.NaN, 10_000) === 0, 'NaN seek is 0');
+assert(clampSeek(12_000, 10_000) === 10_000, 'Seek past the end clamps to the duration');
+assert(clampSeek(5_000, 0) === 0 && clampSeek(5_000, -1) === 0 && clampSeek(5_000, Number.NaN) === 0, 'Unknown or zero duration seeks to 0');
+assert(clampSeek(1234.6, 10_000) === 1235, 'Seek is whole milliseconds');
+
+const long = 'а'.repeat(80);
+const empty = searchEmptyText(`  ${long}  `, sourceLabels.deezer);
+assert(empty.includes(`«${'а'.repeat(60)}…»`), 'Long query is cut to 60 characters with an ellipsis');
+assert(empty.includes('Deezer'), 'Empty text names the source');
+assert(searchEmptyText('   Сати   ', 'Spotify').startsWith('Ничего не нашли по «Сати»'), 'Query is trimmed');
+assert(!searchEmptyText('Сати', 'Spotify').includes('…'), 'Short query is not cut');
+assert(Object.keys(sourceLabels).length === 6 && sourceLabels['soundcloud-playlist'] === 'Плейлист SoundCloud', 'A label for every source chip');
+console.log('Format assertions passed');

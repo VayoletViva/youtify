@@ -4,6 +4,8 @@ import { defineConfig } from 'vite';
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
+  // Relative asset URLs: Tauri serves dist/ at its root either way, and static previews under a sub-path keep working.
+  base: './',
   clearScreen: false,
   server: {
     host: host || '0.0.0.0',

@@ -20,6 +20,27 @@ export function waitText(seconds: number): string {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`;
 }
 
+/** Seek target in ms, always inside [0, duration]; NaN or a negative duration gives 0. */
+export function clampSeek(ms: number, durationMs: number): number {
+  const duration = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
+  if (!Number.isFinite(ms)) return 0;
+  return Math.round(Math.min(duration, Math.max(0, ms)));
+}
+
+/** Chip labels for the search source radios (value -> label). */
+export const sourceLabels: Record<string, string> = {
+  spotify: 'Spotify', deezer: 'Deezer', soundcloud: 'SoundCloud',
+  'spotify-playlist': 'Плейлист Spotify', 'deezer-playlist': 'Плейлист Deezer', 'soundcloud-playlist': 'Плейлист SoundCloud',
+};
+
+/** Supporting text for a search with zero results; long queries are cut to 60 characters. */
+export function searchEmptyText(query: string, sourceLabel: string): string {
+  const trimmed = query.trim().replace(/\s+/g, ' ');
+  const chars = Array.from(trimmed);
+  const shown = chars.length > 60 ? `${chars.slice(0, 60).join('').trimEnd()}…` : trimmed;
+  return `Ничего не нашли по «${shown}» (источник: ${sourceLabel}). Попробуй другой источник или вставь ссылку.`;
+}
+
 /** Short Russian explanations for known backend errors; the raw text stays visible in app-status. */
 const knownErrors: [RegExp, string][] = [
   [/Already downloaded/, 'Этот трек уже скачан.'],
