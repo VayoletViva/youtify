@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "tsc -p tsconfig.test.json && esbuild src/theme.test.ts src/format.test.ts --bundle --platform=node --format=esm --outdir=.test && node --test .test/theme.test.js .test/format.test.js",
+    "test": "tsc -p tsconfig.test.json && esbuild src/theme.test.ts src/format.test.ts src/volume.test.ts src/requests.test.ts src/demo.test.ts --bundle --platform=node --format=esm --outdir=.test && node --test .test/theme.test.js .test/format.test.js .test/volume.test.js .test/requests.test.js .test/demo.test.js",
     "tauri": "cd ../crates/tauri-app && tauri"
   },
   "dependencies": {
+    "@fontsource-variable/roboto-flex": "^5.3.0",
     "@material/material-color-utilities": "^0.4.0",
     "@tauri-apps/api": "^2.0.0"
   },

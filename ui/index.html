@@ -18,14 +18,14 @@
     </nav>
 
     <main id="content" tabindex="-1">
-      <header class="top-app-bar"><h1 id="page-title">Главная</h1><span class="assist-chip" title="История и профиль вкуса хранятся на устройстве"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Zm-2 16-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8Z"/></svg>Локально</span></header>
+      <header class="top-app-bar"><h1 id="page-title">Главная</h1><div class="app-bar-chips"><span id="demo-chip" class="assist-chip" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 7h2v2h-2V7Zm0 4h2v6h-2v-6Zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8Z"/></svg>Демо-данные</span><button id="local-chip" type="button" class="assist-chip" aria-label="Локально: о хранении данных"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Zm-2 16-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8Z"/></svg>Локально</button></div></header>
 
       <section id="home-view" aria-labelledby="wave-title">
         <div class="hero-card">
           <div class="hero-copy">
             <h2 id="wave-title">Моя волна</h2>
             <p id="wave-supporting" aria-live="polite">Бесконечный поток под твой вкус. Подмешиваем новые треки из Deezer, YouTube и SoundCloud и учимся по мере прослушивания.</p>
-            <button class="filled wave-start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg>Поймать волну</button>
+            <button class="filled wave-start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg><svg class="ring indeterminate busy-indicator" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg><span class="wave-label">Поймать волну</span></button>
           </div>
           <div class="hero-shape" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg></div>
         </div>
@@ -38,7 +38,7 @@
 
       <section id="search-view" aria-label="Поиск музыки" hidden>
         <form id="search-form" role="search">
-          <label class="search-bar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg><span class="sr-only">Название, исполнитель или ссылка</span><input id="query" type="search" required maxlength="2048" placeholder="Трек, исполнитель или ссылка" autocomplete="off" enterkeyhint="search" /></label>
+          <div class="search-bar"><label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg><span class="sr-only">Название, исполнитель или ссылка</span><input id="query" type="search" required maxlength="2048" placeholder="Трек, исполнитель или ссылка" autocomplete="off" enterkeyhint="search" /></label><button type="submit" class="icon-button search-submit" aria-label="Найти" title="Найти"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 10.59 5.41 16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8Z"/></svg></button></div>
           <div class="chip-set" role="radiogroup" aria-label="Источник">
             <label class="filter-chip"><input type="radio" name="source" value="spotify" checked /><span>Spotify</span></label>
             <label class="filter-chip"><input type="radio" name="source" value="deezer" /><span>Deezer</span></label>
@@ -50,29 +50,35 @@
         </form>
         <p id="search-status" class="supporting" role="status">Ищем в Spotify, Deezer и SoundCloud, слушаем через YouTube или SoundCloud. По ссылке на плейлист импортируем весь список.</p>
         <div id="search-progress" class="linear-progress" hidden><span></span></div>
+        <div id="search-empty" class="state-block" data-kind="empty" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z"/></svg><h2 class="state-title">Ничего не нашлось</h2><p id="search-empty-text" class="supporting"></p><div class="state-actions"><button id="search-change-source" type="button" class="tonal">Сменить источник</button></div></div>
+        <div id="search-error" class="state-block" data-kind="error" role="alert" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 15h2v2h-2v-2Zm0-8h2v6h-2V7Zm1-5C6.47 2 2 6.5 2 12a10 10 0 1 0 10-10Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"/></svg><h2 class="state-title">Поиск не удался</h2><p id="search-error-text" class="supporting"></p><div class="state-actions"><button id="search-retry" type="button" class="tonal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/></svg>Повторить</button></div></div>
         <div id="results" class="list" role="list" aria-label="Результаты поиска"></div>
         <button id="more-results" class="tonal" hidden>Показать ещё</button>
       </section>
 
       <section id="queue-view" aria-label="Очередь воспроизведения" hidden>
         <p id="queue-mode" class="supporting">Обычная очередь</p>
-        <p id="queue-empty" class="empty-state">Пока пусто. Включи волну или выбери трек из плейлиста.</p>
+        <div id="queue-progress" class="linear-progress" hidden><span></span></div>
+        <div id="queue-empty" class="state-block" data-kind="empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6H3v2h12V6Zm0 4H3v2h12v-2ZM3 16h8v-2H3v2ZM17 6v8.18A3 3 0 1 0 19 17V8h3V6h-5Z"/></svg><h2 class="state-title">Очередь пуста</h2><p class="supporting">Пока пусто. Включи волну или выбери трек из плейлиста — следующие треки появятся здесь.</p><div class="state-actions"><button id="queue-wave" type="button" class="tonal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5c2.5-4 5-4 7.5 0s5 4 7.5 0 2.5-1.5 3-1.5v3c-.5 0-1 .5-3 1.5-2.5 4-5 4-7.5 0S5.5 8.5 3 12.5Z"/></svg><svg class="ring indeterminate busy-indicator" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg>Включить волну</button><button id="queue-search" type="button" class="text-button">Найти трек</button></div></div>
         <div id="queue-list" class="list" role="list" aria-label="Очередь"></div>
       </section>
 
       <section id="downloads-view" aria-label="Скачанные треки" hidden>
         <p id="downloads-status" class="supporting">Загружаем список…</p>
-        <p id="downloads-empty" class="empty-state" hidden>Скачанных треков пока нет. Нажми на стрелку рядом с треком, чтобы слушать его без сети.</p>
+        <div id="downloads-progress" class="linear-progress" hidden><span></span></div>
+        <div id="downloads-error" class="state-block" data-kind="error" role="alert" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 15h2v2h-2v-2Zm0-8h2v6h-2V7Zm1-5C6.47 2 2 6.5 2 12a10 10 0 1 0 10-10Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"/></svg><h2 class="state-title">Не удалось прочитать загрузки</h2><p id="downloads-error-text" class="supporting"></p><div class="state-actions"><button id="downloads-retry" type="button" class="tonal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/></svg>Повторить</button></div></div>
+        <div id="downloads-empty" class="state-block" data-kind="empty" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14v-2H5v2Zm14-9h-4V3H9v8H5l7 7 7-7Z"/></svg><h2 class="state-title">Скачанных треков пока нет</h2><p class="supporting">Нажми на стрелку рядом с треком, чтобы слушать его без сети.</p></div>
+        <div id="downloads-info" class="state-block" data-kind="info" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 7h2v2h-2V7Zm0 4h2v6h-2v-6Zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8Z"/></svg><h2 class="state-title">Загрузки доступны в приложении</h2><p class="supporting">В браузере работает только интерфейс. Скачанные треки хранятся в приложении Youtify на устройстве.</p><div class="state-actions"><a class="text-button" href="?demo">Открыть демо</a></div></div>
         <div id="downloads-list" class="list" role="list" aria-label="Скачанные треки"></div>
       </section>
-      <p id="app-status" class="app-status" role="status">Подключение к плееру…</p>
+      <p id="app-status" class="app-status" role="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 15h2v2h-2v-2Zm0-8h2v6h-2V7Zm1-5C6.47 2 2 6.5 2 12a10 10 0 1 0 10-10Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"/></svg><span id="app-status-text">Подключение к плееру…</span><a id="demo-link" class="text-button status-action" href="?demo" hidden>Открыть демо</a></p>
     </main>
 
     <section id="player" class="mini-player" aria-label="Плеер">
       <div class="mini-progress" aria-hidden="true"><span id="mini-progress-bar"></span></div>
       <button id="open-player" class="now-playing" aria-label="Открыть плеер" aria-haspopup="dialog"><span class="cover small"><img id="bar-cover" alt="" hidden /><svg class="cover-fallback" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6Z"/></svg></span><span class="track-copy"><strong id="bar-title">Ничего не играет</strong><span id="bar-artist">Выбери трек или включи волну</span></span></button>
       <div class="mini-controls">
-        <button class="wave-toggle icon-button" aria-label="Моя волна" title="Моя волна"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5c2.5-4 5-4 7.5 0s5 4 7.5 0 2.5-1.5 3-1.5v3c-.5 0-1 .5-3 1.5-2.5 4-5 4-7.5 0S5.5 8.5 3 12.5Z"/></svg></button>
+        <button class="wave-toggle icon-button" aria-label="Моя волна" title="Моя волна"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5c2.5-4 5-4 7.5 0s5 4 7.5 0 2.5-1.5 3-1.5v3c-.5 0-1 .5-3 1.5-2.5 4-5 4-7.5 0S5.5 8.5 3 12.5Z"/></svg><svg class="ring indeterminate busy-indicator" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg></button>
         <button class="play-toggle fab-small" aria-label="Воспроизвести" disabled><svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg><svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6v14Zm8-14v14h4V5h-4Z"/></svg></button>
         <button class="skip-track icon-button" aria-label="Следующий трек" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 18 8.5-6L6 6v12ZM16 6v12h2V6h-2Z"/></svg></button>
       </div>
@@ -88,7 +94,7 @@
         <input class="seek slider" aria-label="Позиция воспроизведения" type="range" min="0" max="1" value="0" step="250" disabled />
         <div class="timeline"><span class="position">0:00</span><span class="duration">0:00</span></div>
         <div class="sheet-controls">
-          <button class="wave-toggle icon-button" aria-label="Моя волна"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5c2.5-4 5-4 7.5 0s5 4 7.5 0 2.5-1.5 3-1.5v3c-.5 0-1 .5-3 1.5-2.5 4-5 4-7.5 0S5.5 8.5 3 12.5Z"/></svg></button>
+          <button class="wave-toggle icon-button" aria-label="Моя волна"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9.5c2.5-4 5-4 7.5 0s5 4 7.5 0 2.5-1.5 3-1.5v3c-.5 0-1 .5-3 1.5-2.5 4-5 4-7.5 0S5.5 8.5 3 12.5Z"/></svg><svg class="ring indeterminate busy-indicator" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg></button>
           <button class="play-toggle fab-large" aria-label="Воспроизвести" disabled><svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg><svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6v14Zm8-14v14h4V5h-4Z"/></svg></button>
           <button class="skip-track icon-button" aria-label="Следующий трек" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 18 8.5-6L6 6v12ZM16 6v12h2V6h-2Z"/></svg></button>
         </div>

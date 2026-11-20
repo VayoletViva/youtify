@@ -1,47 +1,14 @@
+// M3 typeface, bundled (the Tauri CSP allows fonts only from 'self'). Before styles.css so @font-face comes first.
+import '@fontsource-variable/roboto-flex';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { downloadPercent, errorText, formatSize, formatTime } from './format';
+import { createDemoBackend } from './demo';
+import { clampSeek, downloadPercent, errorText, formatSize, formatTime, searchEmptyText, sourceLabels } from './format';
+import { RequestGate } from './requests';
 import { DynamicTheme, safeCoverUrl } from './theme';
+import type { DownloadEvent, DownloadList, PlayerEvent, Snapshot, TrackMetadata } from './types';
+import { gainToSlider, sliderToGain, volumeLabel } from './volume';
 import './styles.css';
-
-interface TrackMetadata {
-  id: string;
-  title: string;
-  artists: string[];
-  album: string | null;
-  duration_ms: number;
-  cover_url: string | null;
-  isrc: string | null;
-}
-interface Snapshot {
-  revision: number;
-  track: TrackMetadata | null;
-  position_ms: number;
-  duration_ms: number;
-  paused: boolean;
-  volume: number;
-  wave: boolean;
-  /** My Wave is fetching new tracks online (Deezer chart, related artists). */
-  discovering: boolean;
-  next_track: TrackMetadata | null;
-  preload: 'idle' | 'resolving' | 'buffering' | 'ready';
-  queue: TrackMetadata[];
-  error: string | null;
-}
-interface DownloadItem { track: TrackMetadata; path: string; bytes: number }
-interface DownloadList { dir: string; items: DownloadItem[] }
-interface DownloadEvent {
-  type: 'download';
-  track_id: string;
-  status: 'started' | 'progress' | 'done' | 'failed' | 'removed';
-  done_bytes: number;
-  total_bytes: number | null;
-  message: string | null;
-}
-type PlayerEvent = { type: 'state'; state: Snapshot }
-  | { type: 'gapless'; from_track_id: string; to_track_id: string }
-  | { type: 'error'; message: string }
-  | DownloadEvent;
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -51,11 +18,20 @@ function element<T extends HTMLElement>(id: string): T {
 function all<T extends HTMLElement>(selector: string): T[] {
   return Array.from(document.querySelectorAll<T>(selector));
 }
+/** Browser preview only (never inside Tauri): ?demo swaps the Tauri bridge for an in-memory backend.
+ *  ?demo=downloads-error makes list_downloads fail at start-up and on opening the view (retry succeeds), to show the error state. */
+const demoMode = isTauri() ? null : new URLSearchParams(location.search).get('demo');
+const demo = demoMode === null ? undefined
+  : createDemoBackend(payload => handleEvent(payload), undefined, { failTimes: demoMode === 'downloads-error' ? { list_downloads: 2 } : {} });
+const hasBackend = isTauri() || demo !== undefined;
+
 const theme = new DynamicTheme();
 const sheet = element<HTMLDialogElement>('player-sheet');
 const query = element<HTMLInputElement>('query');
-let searching = false;
+const searchForm = element<HTMLFormElement>('search-form');
+const resultsList = element('results');
 const status = element('app-status');
+const statusText = element('app-status-text');
 const toast = element('toast');
 let state: Snapshot | undefined;
 let unlisten: UnlistenFn | undefined;
@@ -66,16 +42,23 @@ let queueKey = '';
 let artwork: string | null | undefined;
 let activeId: string | null | undefined;
 let waveBusy = false;
-let playRequest = 0;
+/** Latest-wins gates: a slower, older response never overwrites a newer one. */
+const searchGate = new RequestGate();
+const playGate = new RequestGate();
+const downloadsGate = new RequestGate();
+/** The row whose stream is being resolved; re-applied when lists are rebuilt. */
+let pendingPlayId: string | null = null;
 /** Download state shared by every row and the sheet; list_downloads is the source of truth, events patch it. */
 const downloaded = new Set<string>();
 const downloading = new Map<string, { done: number; total: number | null }>();
 const trackTitles = new Map<string, string>();
-let downloadsRequest = 0;
+let downloadsLoaded = false;
 let downloadsTimer: ReturnType<typeof setTimeout> | undefined;
 const noteIcon = document.querySelector('.cover-fallback')!.cloneNode(true);
 const titles: Record<string, string> = { home: 'Главная', search: 'Поиск', queue: 'Очередь', downloads: 'Загрузки' };
 const waveCopy = element('wave-supporting').textContent ?? '';
+const waveLabel = document.querySelector<HTMLElement>('.wave-start .wave-label')!;
+const waveLabelText = waveLabel.textContent ?? '';
 const sourceValue = (): string => document.querySelector<HTMLInputElement>('input[name="source"]:checked')?.value ?? 'spotify';
 const placeholders: Record<string, string> = {
   spotify: 'Трек, исполнитель или ссылка', deezer: 'Трек, исполнитель или ссылка Deezer', soundcloud: 'Трек или ссылка SoundCloud',
@@ -83,12 +66,13 @@ const placeholders: Record<string, string> = {
   'soundcloud-playlist': 'Ссылка на плейлист SoundCloud',
 };
 const icon = (path: string): string => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"/></svg>`;
+// pathLength=100 lets the dash offset be the percentage directly.
+const ring = (extra = ''): string => `<svg class="ring${extra}" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg>`;
 const icons = {
   download: icon('M5 20h14v-2H5v2Zm14-9h-4V3H9v8H5l7 7 7-7Z'),
   done: icon('M5 18h14v2H5v-2Zm4.6-2.7L5 10.7l1.9-1.9 2.7 2.6L17.1 4 19 5.9l-9.4 9.4Z'),
   remove: icon('M6 19c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z'),
-  // pathLength=100 lets the dash offset be the percentage directly.
-  ring: '<svg class="ring" viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-track" cx="12" cy="12" r="8.5" pathLength="100"/><circle class="ring-value" cx="12" cy="12" r="8.5" pathLength="100"/></svg>',
+  ring: ring(),
 };
 /** Paint the M3 active track; WebKit has no ::range-progress. */
 function sliderFill(slider: HTMLInputElement): void {
@@ -96,12 +80,20 @@ function sliderFill(slider: HTMLInputElement): void {
   slider.style.setProperty('--fill', `${(Number(slider.value) / max) * 100}%`);
 }
 
-function notify(message: unknown): void {
+/** The status line under the views; errors get an icon and data-kind="error" (never color alone). */
+function setStatus(text: string, error = false): void {
+  statusText.textContent = text;
+  status.dataset.kind = error ? 'error' : 'info';
+}
+/** Short explanation plus the raw backend detail (codec, source), which stays visible for bug reports. */
+function detail(message: unknown): string {
   const text = errorText(message);
   const raw = String(message);
-  // Keep the backend detail (codec, source) visible for bug reports.
-  status.textContent = text === raw ? text : `${text} (${raw})`;
-  toast.textContent = text;
+  return text === raw ? text : `${text} (${raw})`;
+}
+function notify(message: unknown, error = false): void {
+  setStatus(detail(message), error);
+  toast.textContent = errorText(message);
   toast.classList.remove('leaving');
   toast.hidden = false;
   clearTimeout(toastTimer);
@@ -110,7 +102,9 @@ function notify(message: unknown): void {
     afterExit(toast, () => { if (toast.classList.contains('leaving')) { toast.hidden = true; toast.classList.remove('leaving'); } });
   }, 6500);
 }
+const fail = (error: unknown): void => notify(error, true);
 async function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+  if (demo) return demo.command<T>(name, args);
   if (!isTauri()) throw new Error('В браузере доступен только интерфейс. Для музыки запусти приложение Tauri.');
   return invoke<T>(name, args);
 }
@@ -134,15 +128,30 @@ function setCover(image: HTMLImageElement, cover: string | null): void {
 function enter(rows: HTMLElement[]): void {
   rows.forEach((row, index) => { row.classList.add('enter'); row.style.setProperty('--i', String(Math.min(index, 10))); });
 }
+/** Mark the row whose stream is resolving (ring instead of the duration); null clears every mark. */
+function markPending(id: string | null): void {
+  pendingPlayId = id;
+  for (const row of all<HTMLElement>('.track-item')) paintPending(row);
+}
+function paintPending(row: HTMLElement): void {
+  const on = pendingPlayId !== null && row.dataset.trackId === pendingPlayId;
+  row.classList.toggle('pending', on);
+  if (on) row.setAttribute('aria-busy', 'true'); else row.removeAttribute('aria-busy');
+}
 async function play(track: TrackMetadata): Promise<void> {
-  const request = ++playRequest;
-  status.textContent = `Ищем поток: ${track.title}…`;
+  const token = playGate.begin();
+  markPending(track.id);
+  setStatus(`Ищем поток: ${track.title}…`);
   try {
     await command<void>('play_track', { track });
-    if (request === playRequest && state?.track?.id !== track.id && !state?.error) {
-      status.textContent = `Поток найден. Буферизация: ${track.title}`;
-    }
-  } catch (error) { if (request === playRequest) notify(error); }
+    if (!playGate.isCurrent(token)) return;
+    if (state?.track?.id === track.id) markPending(null);
+    else if (!state?.error) setStatus(`Поток найден. Буферизация: ${track.title}`);
+  } catch (error) {
+    if (!playGate.isCurrent(token)) return;
+    markPending(null);
+    fail(error);
+  }
 }
 
 /** Sync one trailing download button (row or sheet) with the shared state; rebuilds the icon only when its kind changes. */
@@ -181,11 +190,11 @@ async function download(track: TrackMetadata): Promise<void> {
   paintDownloads(track.id);
   try {
     await command<void>('download_track', { track });
-    if (downloading.has(track.id)) status.textContent = `Скачиваем: ${track.title}`;
+    if (downloading.has(track.id)) setStatus(`Скачиваем: ${track.title}`);
   } catch (error) {
     downloading.delete(track.id);
     paintDownloads(track.id);
-    notify(error);
+    fail(error);
     if (/Already downloaded/.test(String(error))) scheduleDownloadsRefresh();
   }
 }
@@ -229,7 +238,7 @@ function deleteButton(track: TrackMetadata): HTMLButtonElement {
       paintDownloads(track.id);
       notify(`Удалено: ${track.title}`);
       await refreshDownloads();
-    } catch (error) { button.disabled = false; reset(); notify(error); }
+    } catch (error) { button.disabled = false; reset(); fail(error); }
   });
   return button;
 }
@@ -257,15 +266,17 @@ function trackRow(track: TrackMetadata, options: { meta?: string; remove?: boole
   copy.append(title, artists);
   const meta = document.createElement('span'); meta.className = 'track-length'; meta.textContent = options.meta ?? formatTime(track.duration_ms);
   button.append(cover, copy, meta);
+  button.insertAdjacentHTML('beforeend', ring(' indeterminate row-ring'));
   button.addEventListener('click', () => { void play(track); });
   item.append(button, options.remove ? deleteButton(track) : downloadButton(track));
+  paintPending(item);
   return item;
 }
 function appendResults(): void {
   const end = Math.min(visibleResults + 40, results.length);
   const rows = results.slice(visibleResults, end).map(track => trackRow(track));
   enter(rows);
-  element('results').append(...rows);
+  resultsList.append(...rows);
   visibleResults = end;
   element('more-results').hidden = visibleResults >= results.length;
 }
@@ -282,18 +293,31 @@ function renderDownloads(list: DownloadList): void {
     ? `${list.items.length} · ${formatSize(total)} · Папка: ${list.dir}`
     : `Папка: ${list.dir}`;
 }
-async function refreshDownloads(): Promise<void> {
-  if (!isTauri()) return;
-  const request = ++downloadsRequest;
+/** visible: the user is looking (view opened, retry), so show the linear progress; background refreshes stay quiet. */
+async function refreshDownloads(visible = false): Promise<void> {
+  if (!hasBackend) return;
+  const token = downloadsGate.begin();
+  const progress = element('downloads-progress');
+  if (visible || !downloadsLoaded) progress.hidden = false;
+  element('downloads-list').setAttribute('aria-busy', 'true');
   try {
     const list = await command<DownloadList>('list_downloads');
-    if (request !== downloadsRequest) return;
+    if (!downloadsGate.isCurrent(token)) return;
+    downloadsLoaded = true;
+    element('downloads-error').hidden = true;
     downloaded.clear();
     for (const item of list.items) { downloaded.add(item.track.id); trackTitles.set(item.track.id, item.track.title); }
     renderDownloads(list);
     paintDownloads();
   } catch (error) {
-    if (request === downloadsRequest) element('downloads-status').textContent = `Не удалось прочитать загрузки: ${errorText(error)}`;
+    if (!downloadsGate.isCurrent(token)) return;
+    element('downloads-status').textContent = 'Список загрузок сейчас недоступен.';
+    element('downloads-error-text').textContent = errorText(error);
+    element('downloads-error').hidden = false;
+    element('downloads-empty').hidden = true;
+    setStatus(detail(error), true);
+  } finally {
+    if (downloadsGate.isCurrent(token)) { progress.hidden = true; element('downloads-list').removeAttribute('aria-busy'); }
   }
 }
 /** Coalesce bursts (several downloads finishing together) into one list_downloads call. */
@@ -312,11 +336,33 @@ function onDownload(event: DownloadEvent): void {
     else if (event.status === 'removed') downloaded.delete(id);
     else {
       const message = event.message ?? '';
-      notify(message.startsWith('Download failed') ? message : `Download failed: ${message}`);
+      fail(message.startsWith('Download failed') ? message : `Download failed: ${message}`);
     }
     scheduleDownloadsRefresh();
   }
   paintDownloads(id);
+}
+/** The same handler serves the Tauri 'player-event' listener and the browser demo backend. */
+function handleEvent(payload: PlayerEvent): void {
+  if (payload.type === 'state') render(payload.state);
+  else if (payload.type === 'error') fail(payload.message);
+  else if (payload.type === 'download') onDownload(payload);
+  else notify('Бесшовный переход · без вставленной тишины');
+}
+
+/** Wave buttons: a ring replaces the icon while the wave starts or fetches tracks; disabled only during the start. */
+function paintWave(): void {
+  // Older backends omit the field; treat it as idle.
+  const discovering = state?.discovering === true;
+  const busy = waveBusy || discovering;
+  for (const button of all<HTMLButtonElement>('.wave-toggle, .wave-start, #queue-wave')) {
+    if (button.classList.contains('wave-toggle')) button.setAttribute('aria-pressed', String(state?.wave === true));
+    button.disabled = waveBusy;
+    button.setAttribute('aria-busy', String(busy));
+  }
+  waveLabel.textContent = busy ? 'Ищем треки…' : waveLabelText;
+  element('wave-supporting').textContent = discovering ? 'Ищем новые треки…' : waveCopy;
+  element('queue-progress').hidden = !busy;
 }
 
 function render(next: Snapshot): void {
@@ -335,6 +381,8 @@ function render(next: Snapshot): void {
     setCover(element<HTMLImageElement>('sheet-cover'), artwork);
     void theme.update(artwork);
   }
+  // The pending row is done once its track is current, or when the backend reports an error.
+  if (pendingPlayId !== null && (track?.id === pendingPlayId || next.error)) markPending(null);
   document.body.classList.toggle('playing', Boolean(track && !next.paused));
   for (const button of all<HTMLButtonElement>('.play-toggle')) {
     button.disabled = !track;
@@ -342,25 +390,21 @@ function render(next: Snapshot): void {
   }
   element('mini-progress-bar').style.transform = `scaleX(${next.duration_ms ? Math.min(1, next.position_ms / next.duration_ms) : 0})`;
   for (const button of all<HTMLButtonElement>('.skip-track')) button.disabled = !track;
-  // Older backends omit the field; treat it as idle.
   const discovering = next.discovering === true;
-  for (const button of all<HTMLButtonElement>('.wave-toggle, .wave-start')) {
-    if (button.classList.contains('wave-toggle')) button.setAttribute('aria-pressed', String(next.wave));
-    button.classList.toggle('discovering', discovering);
-    button.setAttribute('aria-busy', String(discovering));
-  }
-  element('wave-supporting').textContent = discovering ? 'Ищем новые треки…' : waveCopy;
+  paintWave();
   for (const node of all<HTMLElement>('.position')) node.textContent = formatTime(next.position_ms);
   for (const node of all<HTMLElement>('.duration')) node.textContent = formatTime(next.duration_ms);
   for (const slider of all<HTMLInputElement>('.seek')) {
     slider.disabled = !track || !next.duration_ms;
     slider.max = String(Math.max(1, next.duration_ms));
-    if (slider.dataset.editing !== 'true') slider.value = String(Math.min(next.position_ms, next.duration_ms));
+    if (slider.dataset.editing !== 'true') slider.value = String(clampSeek(next.position_ms, next.duration_ms));
     slider.setAttribute('aria-valuetext', `${formatTime(Number(slider.value))} из ${formatTime(next.duration_ms)}`);
     sliderFill(slider);
   }
+  // The snapshot carries linear gain; the sliders hold the perceptual position.
   for (const slider of all<HTMLInputElement>('.volume')) {
-    if (slider.dataset.editing !== 'true') slider.value = String(next.volume);
+    if (slider.dataset.editing !== 'true') slider.value = String(gainToSlider(next.volume));
+    slider.setAttribute('aria-valuetext', volumeLabel(Number(slider.value)));
     sliderFill(slider);
   }
   const preload = { idle: 'Очередь пуста', resolving: 'Ищем следующий поток…', buffering: 'Предзагрузка…', ready: 'Следующий готов' }[next.preload];
@@ -388,23 +432,24 @@ function render(next: Snapshot): void {
     if (track) { sheetDownload.dataset.downloadId = track.id; sheetDownload.dataset.title = track.title; trackTitles.set(track.id, track.title); }
     else { delete sheetDownload.dataset.downloadId; delete sheetDownload.dataset.title; }
     paintDownload(sheetDownload);
-    if (track) status.textContent = `Играет: ${title} · ${artists}`;
+    if (track) setStatus(`Играет: ${title} · ${artists}`);
   }
-  if (next.error) status.textContent = errorText(next.error);
+  if (next.error) setStatus(errorText(next.error), true);
 }
 
 async function control(action: string, value?: number): Promise<void> {
   try { await command<void>('control_playback', { action, value: value ?? null }); }
-  catch (error) { notify(error); }
+  catch (error) { fail(error); }
 }
 /** Live volume while dragging: one request in flight; on completion send the newest value if it moved.
- *  The release ('change') always sends, so the final value lands even if it equals the last live one. */
+ *  The release ('change') always sends, so the final value lands even if it equals the last live one.
+ *  Values here are linear gain (sliderToGain of the slider position). */
 let volumeBusy = false;
 let volumePending: number | undefined;
 let volumeCommit = false;
 let volumeSent: number | undefined;
-function setVolume(value: number, commit: boolean): void {
-  volumePending = value;
+function setVolume(gain: number, commit: boolean): void {
+  volumePending = gain;
   volumeCommit ||= commit;
   if (!volumeBusy) void flushVolume();
 }
@@ -418,20 +463,19 @@ async function flushVolume(): Promise<void> {
       volumeSent = value;
       // Live ticks fail silently (e.g. browser preview); the release reports the error once.
       try { await command<void>('control_playback', { action: 'volume', value }); }
-      catch (error) { volumeSent = undefined; if (commit) notify(error); }
+      catch (error) { volumeSent = undefined; if (commit) fail(error); }
     }
   } finally { volumeBusy = false; }
 }
 async function startWave(): Promise<void> {
   if (waveBusy) return;
   waveBusy = true;
-  const buttons = all<HTMLButtonElement>('.wave-start, .wave-toggle');
-  buttons.forEach(button => { button.disabled = true; });
+  paintWave();
   try {
     await command<TrackMetadata[]>('start_my_wave');
-    status.textContent = 'Моя Волна включена. Подмешиваем новые треки из сети и учимся по мере прослушивания.';
-  } catch (error) { notify(error); }
-  finally { waveBusy = false; buttons.forEach(button => { button.disabled = false; }); }
+    setStatus('Моя Волна включена. Подмешиваем новые треки из сети и учимся по мере прослушивания.');
+  } catch (error) { fail(error); }
+  finally { waveBusy = false; paintWave(); }
 }
 
 const finePointer = matchMedia('(pointer: fine)');
@@ -478,7 +522,7 @@ function show(view: string): void {
   element('page-title').textContent = titles[view] ?? titles.home;
   if (window.scrollY || window.scrollX) window.scrollTo(0, 0); // instant: the new view fades in from the top
   settleViewport();
-  if (view === 'downloads') void refreshDownloads();
+  if (view === 'downloads') void refreshDownloads(true);
   // Auto-focus only with a mouse; on touch it pops the soft keyboard on every visit.
   if (view === 'search' && finePointer.matches) query.focus({ preventScroll: true });
 }
@@ -488,41 +532,91 @@ for (const card of all<HTMLButtonElement>('.action-card')) card.addEventListener
   if (radio) { radio.checked = true; query.placeholder = placeholders[radio.value]; }
   show(card.dataset.goto ?? 'search');
 });
+// A chip change re-runs the search; the gate makes the newest source win even if a search is in flight.
 for (const radio of all<HTMLInputElement>('input[name="source"]')) radio.addEventListener('change', () => {
   query.placeholder = placeholders[radio.value];
-  if (query.value.trim()) element<HTMLFormElement>('search-form').requestSubmit();
+  if (query.value.trim()) searchForm.requestSubmit();
 });
-element<HTMLFormElement>('search-form').addEventListener('submit', async event => {
+searchForm.addEventListener('submit', async event => {
   event.preventDefault();
-  if (searching || !query.value.trim()) return;
-  searching = true;
-  query.blur(); // hide the on-screen keyboard on Android
+  const text = query.value.trim();
+  if (!text) return;
+  const source = sourceValue();
+  const token = searchGate.begin();
+  if (document.activeElement === query) query.blur(); // hide the on-screen keyboard on Android
+  const line = element('search-status');
+  element('search-empty').hidden = true;
+  element('search-error').hidden = true;
+  line.hidden = false;
+  line.textContent = 'Ищем музыку…';
   element('search-progress').hidden = false;
-  element('search-status').textContent = 'Ищем музыку…';
+  resultsList.setAttribute('aria-busy', 'true');
   try {
-    results = await command<TrackMetadata[]>('search_tracks', { query: query.value.trim(), source: sourceValue() });
+    const found = await command<TrackMetadata[]>('search_tracks', { query: text, source });
+    if (!searchGate.isCurrent(token)) return;
+    results = found;
     visibleResults = 0;
-    element('results').replaceChildren();
+    resultsList.replaceChildren();
     appendResults();
-    element('search-status').textContent = results.length ? `Найдено: ${results.length}. Треки добавлены в локальную библиотеку Волны.` : 'Ничего не найдено.';
-  } catch (error) { element('search-status').textContent = 'Поиск не удался. Попробуй другой источник или прямую ссылку.'; notify(error); }
-  finally { searching = false; element('search-progress').hidden = true; }
+    if (found.length) line.textContent = `Найдено: ${found.length}. Треки добавлены в локальную библиотеку Волны.`;
+    else {
+      line.hidden = true;
+      element('search-empty-text').textContent = searchEmptyText(text, sourceLabels[source] ?? source);
+      element('search-empty').hidden = false;
+    }
+  } catch (error) {
+    if (!searchGate.isCurrent(token)) return;
+    results = [];
+    visibleResults = 0;
+    resultsList.replaceChildren();
+    element('more-results').hidden = true;
+    line.hidden = true;
+    element('search-error-text').textContent = errorText(error);
+    element('search-error').hidden = false;
+    setStatus(detail(error), true);
+  } finally {
+    if (searchGate.isCurrent(token)) { element('search-progress').hidden = true; resultsList.removeAttribute('aria-busy'); }
+  }
+});
+element('search-retry').addEventListener('click', () => {
+  // The retry button hides with its block; keep keyboard focus in the search bar.
+  searchForm.querySelector<HTMLButtonElement>('.search-submit')?.focus({ preventScroll: true });
+  searchForm.requestSubmit();
+});
+element('search-change-source').addEventListener('click', () => {
+  const next = document.querySelector<HTMLInputElement>('input[name="source"]:not(:checked)');
+  if (!next) return;
+  next.closest('label')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  // focusVisible: show the ring even after a mouse click (ignored where unsupported).
+  next.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
 });
 element('more-results').addEventListener('click', appendResults);
-for (const button of all<HTMLButtonElement>('.wave-start, .wave-toggle')) button.addEventListener('click', () => { void startWave(); });
+for (const button of all<HTMLButtonElement>('.wave-start, .wave-toggle, #queue-wave')) button.addEventListener('click', () => { void startWave(); });
+element('queue-search').addEventListener('click', () => show('search'));
+element('downloads-retry').addEventListener('click', () => { void refreshDownloads(true); });
+element('local-chip').addEventListener('click', () => notify('История и профиль вкуса хранятся только на этом устройстве.'));
 for (const button of all<HTMLButtonElement>('.play-toggle')) button.addEventListener('click', () => { void control(state?.paused ? 'resume' : 'pause'); });
-for (const button of all<HTMLButtonElement>('.skip-track')) button.addEventListener('click', () => { void control('skip'); });
+for (const button of all<HTMLButtonElement>('.skip-track')) button.addEventListener('click', () => {
+  // A skip supersedes a play that is still resolving.
+  playGate.cancel();
+  markPending(null);
+  void control('skip');
+});
 element('sheet-download').addEventListener('click', () => { if (state?.track) void download(state.track); });
 paintDownload(element<HTMLButtonElement>('sheet-download'));
 const volumeSliders = all<HTMLInputElement>('.volume');
 const endVolumeEdit = (): void => { for (const other of volumeSliders) other.dataset.editing = 'false'; };
+for (const slider of volumeSliders) slider.setAttribute('aria-valuetext', volumeLabel(Number(slider.value)));
 for (const slider of all<HTMLInputElement>('.seek, .volume')) {
   const volume = slider.classList.contains('volume');
   slider.addEventListener('input', () => {
     if (volume) {
       // Mirror into the other volume slider so the mini player and the sheet agree mid-drag.
-      for (const other of volumeSliders) { other.dataset.editing = 'true'; other.value = slider.value; sliderFill(other); }
-      setVolume(Number(slider.value), false);
+      for (const other of volumeSliders) {
+        other.dataset.editing = 'true'; other.value = slider.value; sliderFill(other);
+        other.setAttribute('aria-valuetext', volumeLabel(Number(slider.value)));
+      }
+      setVolume(sliderToGain(Number(slider.value)), false);
       return;
     }
     slider.dataset.editing = 'true';
@@ -530,9 +624,9 @@ for (const slider of all<HTMLInputElement>('.seek, .volume')) {
     slider.setAttribute('aria-valuetext', formatTime(Number(slider.value)));
   });
   slider.addEventListener('change', () => {
-    if (volume) { endVolumeEdit(); setVolume(Number(slider.value), true); return; }
+    if (volume) { endVolumeEdit(); setVolume(sliderToGain(Number(slider.value)), true); return; }
     slider.dataset.editing = 'false';
-    void control('seek', Number(slider.value));
+    void control('seek', clampSeek(Number(slider.value), state?.duration_ms ?? 0));
   });
   const stop = (): void => { if (volume) endVolumeEdit(); else slider.dataset.editing = 'false'; };
   slider.addEventListener('blur', stop);
@@ -561,27 +655,29 @@ document.addEventListener('visibilitychange', () => { document.body.classList.to
 document.addEventListener('keydown', event => {
   const target = event.target;
   if (event.code !== 'Space' || event.repeat || !(target instanceof HTMLElement)
-    || target.closest('input, textarea, select, button, [contenteditable]')) return;
+    || target.closest('input, textarea, select, button, a, [contenteditable]')) return;
   if (state?.track) { event.preventDefault(); void control(state.paused ? 'resume' : 'pause'); }
 });
-window.addEventListener('pagehide', () => { unlisten?.(); unlisten = undefined; });
+window.addEventListener('pagehide', () => { unlisten?.(); unlisten = undefined; demo?.dispose(); });
 
 async function connect(): Promise<void> {
-  if (!isTauri()) {
-    status.textContent = 'Предпросмотр интерфейса. Воспроизведение и поиск доступны в приложении Tauri.';
-    element('downloads-status').textContent = 'Загрузки доступны в приложении Tauri.';
+  if (!hasBackend) {
+    setStatus('Предпросмотр интерфейса. Воспроизведение и поиск доступны в приложении Tauri.');
+    element('demo-link').hidden = false;
+    element('downloads-status').hidden = true;
+    element('downloads-info').hidden = false;
     return;
   }
+  element('demo-chip').hidden = !demo;
   try {
-    unlisten = await listen<PlayerEvent>('player-event', ({ payload }) => {
-      if (payload.type === 'state') render(payload.state);
-      else if (payload.type === 'error') notify(payload.message);
-      else if (payload.type === 'download') onDownload(payload);
-      else notify('Бесшовный переход · без вставленной тишины');
-    });
+    if (!demo) unlisten = await listen<PlayerEvent>('player-event', ({ payload }) => handleEvent(payload));
     render(await command<Snapshot>('get_player_state'));
-    if (!state?.error) status.textContent = 'Готово. История и профиль вкуса хранятся локально.';
-  } catch (error) { notify(error); }
+    if (!state?.error) {
+      setStatus(demo
+        ? 'Демо-режим: примеры треков и загрузок живут только в этой вкладке. Попробуй найти «Сати», «пусто» или «ошибка».'
+        : 'Готово. История и профиль вкуса хранятся локально.');
+    }
+  } catch (error) { fail(error); }
   await refreshDownloads();
 }
 void connect();
